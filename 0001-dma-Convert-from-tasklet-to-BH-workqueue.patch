@@ -1,7 +1,7 @@
-From 0d9d166970cb6f11b97b8e4575eba91e1d3fb0f6 Mon Sep 17 00:00:00 2001
+From 44bd588278dddee78a6d128f7becf1ba1717d6a5 Mon Sep 17 00:00:00 2001
 From: Allen Pais <apais@linux.microsoft.com>
 Date: Wed, 7 Feb 2024 18:27:39 +0000
-Subject: [PATCH] dma: Convert from tasklet to BH workqueue
+Subject: [PATCH 1/8] dma: Convert from tasklet to BH workqueue
 
 The only generic interface to execute asynchronously in the BH context is
 tasklet; however, it's marked deprecated and has some design flaws. To
@@ -12,7 +12,7 @@ are executed in the BH context.
 This patch converts drivers/dma/* from tasklet to BH workqueue.
 
 Based on the work done by Tejun Heo <tj@kernel.org>
-Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git for-6.9-bh-conversions
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
 
 Signed-off-by: Allen Pais <allen.lkml@gmail.com>
 ---
