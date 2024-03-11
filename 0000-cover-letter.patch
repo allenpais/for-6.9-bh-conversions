@@ -1,0 +1,333 @@
+From 9fa8951ea16401543fad99ee521d659d1aac25b6 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:21:12 +0000
+Subject: [PATCH 00/18] BH workqueue Converstions (NOT TESTED)
+
+Convert tasklets to workqueues in BH mechanism
+
+This series begins the transition from tasklets to workqueues 
+within the BH mechanism to enhance performance and retire tasklets
+completely. The majority of conversions are now complete, 
+offering a foundational shift towards a more modern, efficient 
+bottom half processing model.
+
+Key Changes:
+- Converted driver/* tasklets to workqueues across.
+- Retained use of certain legacy tasklet APIs 
+(e.g., init_tasklet, tasklet_unlock_wait) These will be 
+converted shortly.
+
+Upcoming:
+- Finalize the conversion of remaining tasklets to workqueues.
+- Remove dependency on legacy tasklet APIs, replacing them with
+their workqueue counterparts.
+- Comprehensive testing and benchmarking to validate performance 
+improvements and identify any regressions.
+
+This series is part of an ongoing effort to modernize the kernel's 
+bottom half handling, and while substantial progress has been made, 
+further refinements and cleanups are planned. The current state is unstable 
+and is not ready for preliminary review.
+
+
+Allen Pais (18):
+  memstick: Convert from tasklet to BH workqueue
+  tty: Convert from tasklet to BH workqueue
+  scsi: Convert from tasklet to BH workqueue
+  wireless: Convert from tasklet to BH workqueue
+  ethernet:  Convert from tasklet to BH workqueue
+  archnet:  Convert from tasklet to BH workqueue
+  wwan:  Convert from tasklet to BH workqueue
+  net: Convert from tasklet to BH workqueue
+  rapidio: Convert from tasklet to BH workqueue
+  pci-hyperv: Convert from tasklet to BH workqueue
+  input: Convert from tasklet to BH workqueue
+  md: Convert from tasklet to BH workqueue
+  firewire: Convert from tasklet to BH workqueue
+  misc: Convert from tasklet to BH workqueue
+  hsi: Convert from tasklet to BH workqueue
+  bus: Convert from tasklet to BH workqueue
+  crypto: Convert from tasklet to BH workqueue
+  net: Convert from tasklet to BH workqueue
+
+ drivers/bus/mhi/host/internal.h               |  2 +-
+ drivers/bus/mhi/host/pm.c                     |  4 +-
+ drivers/crypto/amcc/crypto4xx_core.c          |  4 +-
+ drivers/crypto/amcc/crypto4xx_core.h          |  3 +-
+ drivers/crypto/aspeed/aspeed-acry.c           |  7 +-
+ drivers/crypto/aspeed/aspeed-hace.c           |  4 +-
+ drivers/crypto/aspeed/aspeed-hace.h           |  5 +-
+ drivers/crypto/atmel-aes.c                    | 29 +++---
+ drivers/crypto/atmel-sha.c                    | 29 +++---
+ drivers/crypto/atmel-tdes.c                   | 33 +++----
+ drivers/crypto/axis/artpec6_crypto.c          | 15 ++--
+ drivers/crypto/caam/intern.h                  |  2 +-
+ drivers/crypto/caam/jr.c                      | 10 +--
+ drivers/crypto/cavium/cpt/cptvf_main.c        |  7 +-
+ drivers/crypto/cavium/nitrox/nitrox_dev.h     |  3 +-
+ drivers/crypto/cavium/nitrox/nitrox_isr.c     |  8 +-
+ drivers/crypto/ccp/ccp-dev.c                  | 15 ++--
+ drivers/crypto/ccp/ccp-dev.h                  |  7 +-
+ drivers/crypto/ccp/ccp-dmaengine.c            |  2 +-
+ drivers/crypto/ccree/cc_fips.c                | 15 ++--
+ drivers/crypto/ccree/cc_request_mgr.c         | 15 ++--
+ drivers/crypto/hifn_795x.c                    | 15 ++--
+ drivers/crypto/img-hash.c                     | 19 ++--
+ drivers/crypto/intel/ixp4xx/ixp4xx_crypto.c   | 11 +--
+ .../intel/qat/qat_common/adf_accel_devices.h  |  3 +-
+ drivers/crypto/intel/qat/qat_common/adf_isr.c |  4 +-
+ .../qat/qat_common/adf_transport_internal.h   |  3 +-
+ .../crypto/intel/qat/qat_common/adf_vf_isr.c  |  8 +-
+ drivers/crypto/marvell/octeontx/otx_cptvf.h   |  3 +-
+ .../crypto/marvell/octeontx/otx_cptvf_main.c  |  2 +-
+ drivers/crypto/marvell/octeontx2/otx2_cptlf.h |  5 +-
+ .../marvell/octeontx2/otx2_cptvf_main.c       |  4 +-
+ drivers/crypto/omap-aes.c                     |  4 +-
+ drivers/crypto/omap-aes.h                     |  2 +-
+ drivers/crypto/omap-des.c                     | 11 +--
+ drivers/crypto/omap-sham.c                    |  9 +-
+ drivers/crypto/qce/core.c                     |  2 +-
+ drivers/crypto/qce/core.h                     |  4 +-
+ drivers/crypto/s5p-sss.c                      | 39 ++++----
+ drivers/crypto/starfive/jh7110-cryp.c         |  8 +-
+ drivers/crypto/starfive/jh7110-cryp.h         |  5 +-
+ drivers/crypto/talitos.c                      |  4 +-
+ drivers/crypto/talitos.h                      |  4 +-
+ drivers/crypto/virtio/virtio_crypto_common.h  |  3 +-
+ drivers/crypto/virtio/virtio_crypto_core.c    |  2 +-
+ drivers/firewire/ohci.c                       | 49 ++++++-----
+ drivers/hsi/clients/nokia-modem.c             | 15 ++--
+ drivers/hsi/controllers/omap_ssi.h            |  5 +-
+ drivers/hsi/controllers/omap_ssi_core.c       |  2 +-
+ drivers/input/keyboard/omap-keypad.c          |  6 +-
+ drivers/input/serio/hil_mlc.c                 |  4 +-
+ drivers/input/serio/hp_sdc.c                  |  2 +-
+ drivers/input/serio/hp_sdc_mlc.c              |  2 +-
+ drivers/md/dm-crypt.c                         | 23 ++---
+ drivers/md/dm-verity.h                        |  7 +-
+ drivers/memstick/host/jmb38x_ms.c             | 13 +--
+ drivers/memstick/host/tifm_ms.c               | 11 +--
+ drivers/misc/ibmvmc.c                         |  8 +-
+ drivers/misc/ibmvmc.h                         |  3 +-
+ drivers/net/arcnet/arcdevice.h                |  3 +-
+ drivers/net/arcnet/arcnet.c                   | 11 +--
+ drivers/net/caif/caif_virtio.c                | 15 ++--
+ drivers/net/ethernet/alteon/acenic.c          | 23 ++---
+ drivers/net/ethernet/alteon/acenic.h          |  5 +-
+ drivers/net/ethernet/amd/xgbe/xgbe-drv.c      | 25 +++---
+ drivers/net/ethernet/amd/xgbe/xgbe-i2c.c      | 13 +--
+ drivers/net/ethernet/amd/xgbe/xgbe-mdio.c     | 13 +--
+ drivers/net/ethernet/amd/xgbe/xgbe.h          | 11 +--
+ drivers/net/ethernet/broadcom/cnic.c          | 19 ++--
+ drivers/net/ethernet/broadcom/cnic.h          |  2 +-
+ drivers/net/ethernet/cadence/macb.h           |  3 +-
+ drivers/net/ethernet/cadence/macb_main.c      | 11 +--
+ .../net/ethernet/cavium/liquidio/lio_main.c   | 25 +++---
+ .../ethernet/cavium/liquidio/lio_vf_main.c    |  8 +-
+ .../ethernet/cavium/liquidio/octeon_main.h    |  5 +-
+ .../net/ethernet/cavium/octeon/octeon_mgmt.c  | 13 +--
+ drivers/net/ethernet/cavium/thunder/nic.h     |  5 +-
+ .../net/ethernet/cavium/thunder/nicvf_main.c  | 25 +++---
+ .../ethernet/cavium/thunder/nicvf_queues.c    |  4 +-
+ .../ethernet/cavium/thunder/nicvf_queues.h    |  3 +-
+ drivers/net/ethernet/chelsio/cxgb/sge.c       | 19 ++--
+ drivers/net/ethernet/chelsio/cxgb4/cxgb4.h    |  9 +-
+ .../ethernet/chelsio/cxgb4/cxgb4_tc_mqprio.c  |  2 +-
+ .../net/ethernet/chelsio/cxgb4/cxgb4_uld.c    |  2 +-
+ drivers/net/ethernet/chelsio/cxgb4/sge.c      | 40 +++++----
+ drivers/net/ethernet/chelsio/cxgb4vf/sge.c    |  4 +-
+ drivers/net/ethernet/dlink/sundance.c         | 41 ++++-----
+ .../net/ethernet/huawei/hinic/hinic_hw_eqs.c  | 17 ++--
+ .../net/ethernet/huawei/hinic/hinic_hw_eqs.h  |  3 +-
+ drivers/net/ethernet/ibm/ehea/ehea.h          |  3 +-
+ drivers/net/ethernet/ibm/ehea/ehea_main.c     | 15 ++--
+ drivers/net/ethernet/ibm/ibmvnic.c            | 25 +++---
+ drivers/net/ethernet/ibm/ibmvnic.h            |  2 +-
+ drivers/net/ethernet/jme.c                    | 74 ++++++++--------
+ drivers/net/ethernet/jme.h                    |  9 +-
+ drivers/net/ethernet/marvell/skge.c           | 13 +--
+ drivers/net/ethernet/marvell/skge.h           |  3 +-
+ drivers/net/ethernet/mediatek/mtk_wed_wo.c    | 13 +--
+ drivers/net/ethernet/mediatek/mtk_wed_wo.h    |  3 +-
+ drivers/net/ethernet/mellanox/mlx4/cq.c       | 16 ++--
+ drivers/net/ethernet/mellanox/mlx4/eq.c       |  2 +-
+ drivers/net/ethernet/mellanox/mlx4/mlx4.h     | 11 +--
+ drivers/net/ethernet/mellanox/mlx5/core/cq.c  | 14 +--
+ drivers/net/ethernet/mellanox/mlx5/core/eq.c  |  2 +-
+ .../ethernet/mellanox/mlx5/core/fpga/conn.c   | 15 ++--
+ .../ethernet/mellanox/mlx5/core/fpga/conn.h   |  3 +-
+ .../net/ethernet/mellanox/mlx5/core/lib/eq.h  | 11 +--
+ drivers/net/ethernet/mellanox/mlxsw/pci.c     | 29 +++---
+ drivers/net/ethernet/micrel/ks8842.c          | 29 +++---
+ drivers/net/ethernet/micrel/ksz884x.c         | 37 ++++----
+ drivers/net/ethernet/natsemi/ns83820.c        | 11 +--
+ drivers/net/ethernet/netronome/nfp/nfd3/dp.c  |  6 +-
+ .../net/ethernet/netronome/nfp/nfd3/nfd3.h    |  2 +-
+ drivers/net/ethernet/netronome/nfp/nfdk/dp.c  |  6 +-
+ .../net/ethernet/netronome/nfp/nfdk/nfdk.h    |  3 +-
+ drivers/net/ethernet/netronome/nfp/nfp_net.h  |  5 +-
+ .../ethernet/netronome/nfp/nfp_net_common.c   |  8 +-
+ .../net/ethernet/netronome/nfp/nfp_net_dp.h   |  4 +-
+ drivers/net/ethernet/ni/nixge.c               | 19 ++--
+ drivers/net/ethernet/qlogic/qed/qed.h         |  3 +-
+ drivers/net/ethernet/qlogic/qed/qed_int.c     |  6 +-
+ drivers/net/ethernet/qlogic/qed/qed_int.h     |  5 +-
+ drivers/net/ethernet/qlogic/qed/qed_main.c    | 21 ++---
+ drivers/net/ethernet/sfc/falcon/farch.c       |  4 +-
+ drivers/net/ethernet/sfc/siena/farch.c        |  4 +-
+ drivers/net/ethernet/silan/sc92031.c          | 45 +++++-----
+ drivers/net/ethernet/smsc/smc91x.c            | 17 ++--
+ drivers/net/ethernet/smsc/smc91x.h            |  3 +-
+ drivers/net/ifb.c                             | 15 ++--
+ drivers/net/ppp/ppp_async.c                   | 17 ++--
+ drivers/net/ppp/ppp_synctty.c                 | 17 ++--
+ drivers/net/usb/cdc_ncm.c                     | 13 +--
+ drivers/net/usb/hso.c                         | 19 ++--
+ drivers/net/usb/lan78xx.c                     |  2 +-
+ drivers/net/usb/pegasus.c                     | 15 ++--
+ drivers/net/usb/pegasus.h                     |  2 +-
+ drivers/net/usb/rtl8150.c                     | 15 ++--
+ drivers/net/usb/usbnet.c                      | 25 +++---
+ drivers/net/wan/farsync.c                     | 15 ++--
+ drivers/net/wan/hdlc_x25.c                    | 15 ++--
+ drivers/net/wireless/ath/ath10k/htt_rx.c      |  2 +-
+ drivers/net/wireless/ath/ath11k/ahb.c         | 15 ++--
+ drivers/net/wireless/ath/ath11k/ce.h          |  2 +-
+ drivers/net/wireless/ath/ath11k/pcic.c        | 16 ++--
+ drivers/net/wireless/ath/ath12k/ce.h          |  2 +-
+ drivers/net/wireless/ath/ath12k/pci.c         | 15 ++--
+ drivers/net/wireless/ath/ath5k/ath5k.h        | 17 ++--
+ drivers/net/wireless/ath/ath5k/base.c         | 62 ++++++-------
+ drivers/net/wireless/ath/ath5k/rfkill.c       |  8 +-
+ drivers/net/wireless/ath/ath9k/ath9k.h        | 15 ++--
+ drivers/net/wireless/ath/ath9k/beacon.c       | 14 +--
+ drivers/net/wireless/ath/ath9k/htc.h          | 11 +--
+ drivers/net/wireless/ath/ath9k/htc_drv_main.c |  2 +-
+ drivers/net/wireless/ath/ath9k/htc_drv_txrx.c | 20 ++---
+ drivers/net/wireless/ath/ath9k/main.c         | 38 ++++----
+ drivers/net/wireless/ath/ath9k/wmi.c          | 10 +--
+ drivers/net/wireless/ath/ath9k/wmi.h          |  4 +-
+ drivers/net/wireless/ath/ath9k/wow.c          |  4 +-
+ drivers/net/wireless/ath/carl9170/carl9170.h  |  3 +-
+ drivers/net/wireless/ath/carl9170/usb.c       | 19 ++--
+ drivers/net/wireless/atmel/at76c50x-usb.c     | 11 +--
+ drivers/net/wireless/atmel/at76c50x-usb.h     |  2 +-
+ .../wireless/broadcom/b43legacy/b43legacy.h   |  7 +-
+ .../net/wireless/broadcom/b43legacy/main.c    | 11 +--
+ drivers/net/wireless/broadcom/b43legacy/pio.c | 27 +++---
+ drivers/net/wireless/broadcom/b43legacy/pio.h |  5 +-
+ .../broadcom/brcm80211/brcmsmac/mac80211_if.c | 12 +--
+ .../broadcom/brcm80211/brcmsmac/mac80211_if.h |  5 +-
+ drivers/net/wireless/intel/ipw2x00/ipw2100.c  | 15 ++--
+ drivers/net/wireless/intel/ipw2x00/ipw2100.h  |  3 +-
+ drivers/net/wireless/intel/ipw2x00/ipw2200.c  | 13 +--
+ drivers/net/wireless/intel/ipw2x00/ipw2200.h  |  5 +-
+ .../net/wireless/intel/iwlegacy/3945-mac.c    | 20 +++--
+ .../net/wireless/intel/iwlegacy/4965-mac.c    | 18 ++--
+ drivers/net/wireless/intel/iwlegacy/common.h  |  3 +-
+ drivers/net/wireless/intel/iwlwifi/mvm/sta.h  |  2 +-
+ drivers/net/wireless/intersil/p54/p54pci.c    | 11 +--
+ drivers/net/wireless/intersil/p54/p54pci.h    |  3 +-
+ drivers/net/wireless/marvell/mwl8k.c          | 61 ++++++-------
+ drivers/net/wireless/mediatek/mt76/mt76.h     |  5 +-
+ .../wireless/mediatek/mt76/mt7603/beacon.c    |  4 +-
+ .../net/wireless/mediatek/mt76/mt7603/init.c  |  2 +-
+ .../net/wireless/mediatek/mt76/mt7603/mac.c   |  4 +-
+ .../net/wireless/mediatek/mt76/mt7603/main.c  |  8 +-
+ .../wireless/mediatek/mt76/mt7603/mt7603.h    |  3 +-
+ .../net/wireless/mediatek/mt76/mt7615/mmio.c  |  9 +-
+ .../net/wireless/mediatek/mt76/mt7615/pci.c   |  2 +-
+ .../wireless/mediatek/mt76/mt7615/pci_init.c  |  2 +-
+ .../net/wireless/mediatek/mt76/mt76x0/main.c  |  4 +-
+ .../net/wireless/mediatek/mt76/mt76x0/pci.c   |  2 +-
+ .../net/wireless/mediatek/mt76/mt76x02_dfs.c  | 12 +--
+ .../net/wireless/mediatek/mt76/mt76x02_dfs.h  |  3 +-
+ .../net/wireless/mediatek/mt76/mt76x02_mmio.c | 19 ++--
+ .../net/wireless/mediatek/mt76/mt76x2/pci.c   |  2 +-
+ .../wireless/mediatek/mt76/mt76x2/pci_init.c  |  4 +-
+ .../wireless/mediatek/mt76/mt76x2/pci_main.c  |  8 +-
+ .../net/wireless/mediatek/mt76/mt7915/init.c  |  2 +-
+ .../net/wireless/mediatek/mt76/mt7915/mmio.c  |  9 +-
+ .../net/wireless/mediatek/mt76/mt7921/pci.c   |  4 +-
+ .../net/wireless/mediatek/mt76/mt7925/pci.c   |  4 +-
+ .../net/wireless/mediatek/mt76/mt7996/init.c  |  2 +-
+ .../net/wireless/mediatek/mt76/mt7996/mmio.c  |  9 +-
+ drivers/net/wireless/mediatek/mt7601u/dma.c   | 22 ++---
+ .../net/wireless/mediatek/mt7601u/mt7601u.h   |  5 +-
+ .../wireless/quantenna/qtnfmac/pcie/pcie.c    |  2 +-
+ .../quantenna/qtnfmac/pcie/pcie_priv.h        |  3 +-
+ .../quantenna/qtnfmac/pcie/pearl_pcie.c       | 11 +--
+ .../quantenna/qtnfmac/pcie/topaz_pcie.c       | 13 +--
+ .../net/wireless/ralink/rt2x00/rt2400pci.c    | 49 ++++++-----
+ .../net/wireless/ralink/rt2x00/rt2500pci.c    | 49 ++++++-----
+ .../net/wireless/ralink/rt2x00/rt2800mmio.c   | 88 ++++++++++---------
+ .../net/wireless/ralink/rt2x00/rt2800mmio.h   | 10 +--
+ drivers/net/wireless/ralink/rt2x00/rt2x00.h   | 27 +++---
+ .../net/wireless/ralink/rt2x00/rt2x00dev.c    | 12 +--
+ drivers/net/wireless/ralink/rt2x00/rt61pci.c  | 61 ++++++-------
+ drivers/net/wireless/realtek/rtlwifi/pci.c    | 25 +++---
+ drivers/net/wireless/realtek/rtlwifi/ps.c     |  2 +-
+ drivers/net/wireless/realtek/rtlwifi/usb.c    | 15 ++--
+ drivers/net/wireless/realtek/rtlwifi/usb.h    |  3 +-
+ drivers/net/wireless/realtek/rtlwifi/wifi.h   |  7 +-
+ drivers/net/wireless/zydas/zd1211rw/zd_usb.c  | 15 ++--
+ drivers/net/wireless/zydas/zd1211rw/zd_usb.h  |  3 +-
+ drivers/net/wwan/iosm/iosm_ipc_imem_ops.c     |  2 +-
+ drivers/net/wwan/iosm/iosm_ipc_mux_codec.h    |  2 +-
+ drivers/net/wwan/iosm/iosm_ipc_task_queue.c   | 20 ++---
+ drivers/net/wwan/iosm/iosm_ipc_task_queue.h   | 28 +++---
+ drivers/pci/controller/pci-hyperv.c           | 12 +--
+ drivers/rapidio/devices/tsi721.h              |  2 +-
+ drivers/rapidio/devices/tsi721_dma.c          |  4 +-
+ drivers/scsi/aic7xxx/aic7xxx_osm.c            |  2 +-
+ drivers/scsi/aic94xx/aic94xx_hwi.h            |  3 +-
+ drivers/scsi/esas2r/esas2r.h                  | 15 ++--
+ drivers/scsi/esas2r/esas2r_init.c             |  4 +-
+ drivers/scsi/ibmvscsi/ibmvfc.c                |  4 +-
+ drivers/scsi/ibmvscsi/ibmvfc.h                |  3 +-
+ drivers/scsi/ibmvscsi/ibmvscsi.c              |  4 +-
+ drivers/scsi/ibmvscsi/ibmvscsi.h              |  3 +-
+ drivers/scsi/ibmvscsi_tgt/ibmvscsi_tgt.c      |  4 +-
+ drivers/scsi/ibmvscsi_tgt/ibmvscsi_tgt.h      |  3 +-
+ drivers/scsi/isci/host.h                      | 10 +--
+ drivers/scsi/megaraid/mega_common.h           |  5 +-
+ drivers/scsi/megaraid/megaraid_mbox.c         |  2 +-
+ drivers/scsi/megaraid/megaraid_sas.h          |  4 +-
+ drivers/scsi/megaraid/megaraid_sas_base.c     |  6 +-
+ drivers/scsi/megaraid/megaraid_sas_fusion.c   |  2 +-
+ drivers/scsi/mvsas/mv_init.c                  |  2 +-
+ drivers/scsi/mvsas/mv_sas.h                   | 13 +--
+ drivers/scsi/pm8001/pm8001_init.c             |  6 +-
+ drivers/scsi/pm8001/pm8001_sas.h              | 29 +++---
+ drivers/scsi/pmcraid.c                        | 32 +++----
+ drivers/scsi/pmcraid.h                        |  5 +-
+ drivers/tty/ipwireless/hardware.c             | 15 ++--
+ drivers/tty/serial/atmel_serial.c             | 67 +++++++-------
+ drivers/tty/serial/timbuart.c                 | 19 ++--
+ drivers/tty/vt/keyboard.c                     | 29 +++---
+ net/atm/pppoatm.c                             | 25 +++---
+ net/dccp/ccids/ccid2.c                        | 11 +--
+ net/dccp/timer.c                              |  9 +-
+ net/ipv4/tcp_output.c                         | 37 ++++----
+ net/mac80211/driver-ops.c                     |  4 +-
+ net/mac80211/ieee80211_i.h                    | 17 ++--
+ net/mac80211/main.c                           | 17 ++--
+ net/mac80211/tdls.c                           |  2 +-
+ net/mac80211/tx.c                             | 11 +--
+ net/mac80211/util.c                           |  9 +-
+ net/mac802154/driver-ops.h                    |  4 +-
+ net/mac802154/ieee802154_i.h                  |  3 +-
+ net/mac802154/main.c                          |  9 +-
+ net/rds/ib.h                                  |  9 +-
+ net/rds/ib_cm.c                               |  4 +-
+ net/smc/smc.h                                 |  3 +-
+ net/smc/smc_cdc.c                             | 15 ++--
+ net/smc/smc_core.c                            |  4 +-
+ net/smc/smc_ib.h                              |  5 +-
+ net/smc/smc_wr.c                              | 23 ++---
+ net/vmw_vsock/vmci_transport.c                |  4 +-
+ 276 files changed, 1714 insertions(+), 1523 deletions(-)
+
+-- 
+2.17.1
+

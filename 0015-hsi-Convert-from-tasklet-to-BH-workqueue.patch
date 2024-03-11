@@ -1,0 +1,139 @@
+From 758f95bf5e7c00dcac5c2ac7038c66437ec6ed09 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:16:20 +0000
+Subject: [PATCH 15/18] hsi: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/hsi/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/hsi/clients/nokia-modem.c       | 15 ++++++++-------
+ drivers/hsi/controllers/omap_ssi.h      |  5 +++--
+ drivers/hsi/controllers/omap_ssi_core.c |  2 +-
+ 3 files changed, 12 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/hsi/clients/nokia-modem.c b/drivers/hsi/clients/nokia-modem.c
+index 97ba59e60663..55c7a26e9cfb 100644
+--- a/drivers/hsi/clients/nokia-modem.c
++++ b/drivers/hsi/clients/nokia-modem.c
+@@ -14,6 +14,7 @@
+ #include <linux/of.h>
+ #include <linux/of_irq.h>
+ #include <linux/hsi/ssi_protocol.h>
++#include <linux/workqueue.h>
+ 
+ static unsigned int pm = 1;
+ module_param(pm, int, 0400);
+@@ -26,7 +27,7 @@ struct nokia_modem_gpio {
+ };
+ 
+ struct nokia_modem_device {
+-	struct tasklet_struct	nokia_modem_rst_ind_tasklet;
++	struct work_struct 	nokia_modem_rst_ind_work;
+ 	int			nokia_modem_rst_ind_irq;
+ 	struct device		*device;
+ 	struct nokia_modem_gpio	*gpios;
+@@ -35,7 +36,7 @@ struct nokia_modem_device {
+ 	struct hsi_client	*cmt_speech;
+ };
+ 
+-static void do_nokia_modem_rst_ind_tasklet(unsigned long data)
++static void do_nokia_modem_rst_ind_work(unsigned long data)
+ {
+ 	struct nokia_modem_device *modem = (struct nokia_modem_device *)data;
+ 
+@@ -52,7 +53,7 @@ static irqreturn_t nokia_modem_rst_ind_isr(int irq, void *data)
+ {
+ 	struct nokia_modem_device *modem = (struct nokia_modem_device *)data;
+ 
+-	tasklet_schedule(&modem->nokia_modem_rst_ind_tasklet);
++	queue_work(system_bh_wq, &modem->nokia_modem_rst_ind_work);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -153,8 +154,8 @@ static int nokia_modem_probe(struct device *dev)
+ 	modem->nokia_modem_rst_ind_irq = irq;
+ 	pflags = irq_get_trigger_type(irq);
+ 
+-	tasklet_init(&modem->nokia_modem_rst_ind_tasklet,
+-			do_nokia_modem_rst_ind_tasklet, (unsigned long)modem);
++	tasklet_init(&modem->nokia_modem_rst_ind_work,
++			do_nokia_modem_rst_ind_work, (unsigned long)modem);
+ 	err = devm_request_irq(dev, irq, nokia_modem_rst_ind_isr,
+ 				pflags, "modem_rst_ind", modem);
+ 	if (err < 0) {
+@@ -230,7 +231,7 @@ static int nokia_modem_probe(struct device *dev)
+ 	nokia_modem_gpio_unexport(dev);
+ error1:
+ 	disable_irq_wake(modem->nokia_modem_rst_ind_irq);
+-	tasklet_kill(&modem->nokia_modem_rst_ind_tasklet);
++	cancel_work_sync(&modem->nokia_modem_rst_ind_work);
+ 
+ 	return err;
+ }
+@@ -255,7 +256,7 @@ static int nokia_modem_remove(struct device *dev)
+ 	nokia_modem_gpio_unexport(dev);
+ 	dev_set_drvdata(dev, NULL);
+ 	disable_irq_wake(modem->nokia_modem_rst_ind_irq);
+-	tasklet_kill(&modem->nokia_modem_rst_ind_tasklet);
++	cancel_work_sync(&modem->nokia_modem_rst_ind_work);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/hsi/controllers/omap_ssi.h b/drivers/hsi/controllers/omap_ssi.h
+index c72f74b5bb42..2f752ea655f6 100644
+--- a/drivers/hsi/controllers/omap_ssi.h
++++ b/drivers/hsi/controllers/omap_ssi.h
+@@ -17,6 +17,7 @@
+ #include <linux/gpio/consumer.h>
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
++#include <linux/workqueue.h>
+ 
+ #define SSI_MAX_CHANNELS	8
+ #define SSI_MAX_GDD_LCH		8
+@@ -122,7 +123,7 @@ struct gdd_trn {
+  * @gdd: GDD I/O base address
+  * @fck: SSI functional clock
+  * @gdd_irq: IRQ line for GDD
+- * @gdd_tasklet: bottom half for DMA transfers
++ * @gdd_work: bottom half for DMA transfers
+  * @gdd_trn: Array of GDD transaction data for ongoing GDD transfers
+  * @lock: lock to serialize access to GDD
+  * @fck_nb: DVFS notfifier block
+@@ -140,7 +141,7 @@ struct omap_ssi_controller {
+ 	void __iomem		*gdd;
+ 	struct clk		*fck;
+ 	unsigned int		gdd_irq;
+-	struct tasklet_struct	gdd_tasklet;
++	struct work_struct 	gdd_work;
+ 	struct gdd_trn		gdd_trn[SSI_MAX_GDD_LCH];
+ 	spinlock_t		lock;
+ 	struct notifier_block	fck_nb;
+diff --git a/drivers/hsi/controllers/omap_ssi_core.c b/drivers/hsi/controllers/omap_ssi_core.c
+index 4c1a00f9929e..b002c784633b 100644
+--- a/drivers/hsi/controllers/omap_ssi_core.c
++++ b/drivers/hsi/controllers/omap_ssi_core.c
+@@ -448,7 +448,7 @@ static void ssi_remove_controller(struct hsi_controller *ssi)
+ {
+ 	struct omap_ssi_controller *omap_ssi = hsi_controller_drvdata(ssi);
+ 	int id = ssi->id;
+-	tasklet_kill(&omap_ssi->gdd_tasklet);
++	cancel_work_sync(&omap_ssi->gdd_tasklet);
+ 	hsi_unregister_controller(ssi);
+ 	clk_notifier_unregister(omap_ssi->fck, &omap_ssi->fck_nb);
+ 	ida_simple_remove(&platform_omap_ssi_ida, id);
+-- 
+2.17.1
+

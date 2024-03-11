@@ -1,0 +1,150 @@
+From f399147419a806e2d2bdf591842544721f9b8621 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:01:32 +0000
+Subject: [PATCH 01/18] memstick: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/memstick/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/memstick/host/jmb38x_ms.c | 13 +++++++------
+ drivers/memstick/host/tifm_ms.c   | 11 ++++++-----
+ 2 files changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/memstick/host/jmb38x_ms.c b/drivers/memstick/host/jmb38x_ms.c
+index e77eb8b0eb12..5974d35c6ad2 100644
+--- a/drivers/memstick/host/jmb38x_ms.c
++++ b/drivers/memstick/host/jmb38x_ms.c
+@@ -14,6 +14,7 @@
+ #include <linux/memstick.h>
+ #include <linux/slab.h>
+ #include <linux/module.h>
++#include <linux/workqueue.h>
+ 
+ #define DRIVER_NAME "jmb38x_ms"
+ 
+@@ -48,7 +49,7 @@ struct jmb38x_ms_host {
+ 	struct jmb38x_ms        *chip;
+ 	void __iomem            *addr;
+ 	spinlock_t              lock;
+-	struct tasklet_struct   notify;
++	struct work_struct notify;
+ 	int                     id;
+ 	char                    host_id[32];
+ 	int                     irq;
+@@ -603,7 +604,7 @@ static void jmb38x_ms_abort(struct timer_list *t)
+ 	spin_unlock_irqrestore(&host->lock, flags);
+ }
+ 
+-static void jmb38x_ms_req_tasklet(unsigned long data)
++static void jmb38x_ms_req_work(unsigned long data)
+ {
+ 	struct memstick_host *msh = (struct memstick_host *)data;
+ 	struct jmb38x_ms_host *host = memstick_priv(msh);
+@@ -614,7 +615,7 @@ static void jmb38x_ms_req_tasklet(unsigned long data)
+ 	if (!host->req) {
+ 		do {
+ 			rc = memstick_next_req(msh, &host->req);
+-			dev_dbg(&host->chip->pdev->dev, "tasklet req %d\n", rc);
++			dev_dbg(&host->chip->pdev->dev, "work req %d\n", rc);
+ 		} while (!rc && jmb38x_ms_issue_cmd(msh));
+ 	}
+ 	spin_unlock_irqrestore(&host->lock, flags);
+@@ -629,7 +630,7 @@ static void jmb38x_ms_submit_req(struct memstick_host *msh)
+ {
+ 	struct jmb38x_ms_host *host = memstick_priv(msh);
+ 
+-	tasklet_schedule(&host->notify);
++	queue_work(system_bh_wq, &host->notify);
+ }
+ 
+ static int jmb38x_ms_reset(struct jmb38x_ms_host *host)
+@@ -868,7 +869,7 @@ static struct memstick_host *jmb38x_ms_alloc_host(struct jmb38x_ms *jm, int cnt)
+ 	host->irq = jm->pdev->irq;
+ 	host->timeout_jiffies = msecs_to_jiffies(1000);
+ 
+-	tasklet_init(&host->notify, jmb38x_ms_req_tasklet, (unsigned long)msh);
++	tasklet_init(&host->notify, jmb38x_ms_req_work, (unsigned long)msh);
+ 	msh->request = jmb38x_ms_submit_req;
+ 	msh->set_param = jmb38x_ms_set_param;
+ 
+@@ -980,7 +981,7 @@ static void jmb38x_ms_remove(struct pci_dev *dev)
+ 		host = memstick_priv(jm->hosts[cnt]);
+ 
+ 		jm->hosts[cnt]->request = jmb38x_ms_dummy_submit;
+-		tasklet_kill(&host->notify);
++		cancel_work_sync(&host->notify);
+ 		writel(0, host->addr + INT_SIGNAL_ENABLE);
+ 		writel(0, host->addr + INT_STATUS_ENABLE);
+ 		dev_dbg(&jm->pdev->dev, "interrupts off\n");
+diff --git a/drivers/memstick/host/tifm_ms.c b/drivers/memstick/host/tifm_ms.c
+index c272453670be..d37a9e2f639f 100644
+--- a/drivers/memstick/host/tifm_ms.c
++++ b/drivers/memstick/host/tifm_ms.c
+@@ -14,6 +14,7 @@
+ #include <linux/scatterlist.h>
+ #include <linux/log2.h>
+ #include <linux/module.h>
++#include <linux/workqueue.h>
+ #include <asm/io.h>
+ 
+ #define DRIVER_NAME "tifm_ms"
+@@ -68,7 +69,7 @@ struct tifm_ms {
+ 	struct tifm_dev         *dev;
+ 	struct timer_list       timer;
+ 	struct memstick_request *req;
+-	struct tasklet_struct   notify;
++	struct work_struct notify;
+ 	unsigned int            mode_mask;
+ 	unsigned int            block_pos;
+ 	unsigned long           timeout_jiffies;
+@@ -452,7 +453,7 @@ static void tifm_ms_card_event(struct tifm_dev *sock)
+ 	return;
+ }
+ 
+-static void tifm_ms_req_tasklet(unsigned long data)
++static void tifm_ms_req_work(unsigned long data)
+ {
+ 	struct memstick_host *msh = (struct memstick_host *)data;
+ 	struct tifm_ms *host = memstick_priv(msh);
+@@ -488,7 +489,7 @@ static void tifm_ms_submit_req(struct memstick_host *msh)
+ {
+ 	struct tifm_ms *host = memstick_priv(msh);
+ 
+-	tasklet_schedule(&host->notify);
++	queue_work(system_bh_wq, &host->notify);
+ }
+ 
+ static int tifm_ms_set_param(struct memstick_host *msh,
+@@ -571,7 +572,7 @@ static int tifm_ms_probe(struct tifm_dev *sock)
+ 	host->timeout_jiffies = msecs_to_jiffies(1000);
+ 
+ 	timer_setup(&host->timer, tifm_ms_abort, 0);
+-	tasklet_init(&host->notify, tifm_ms_req_tasklet, (unsigned long)msh);
++	tasklet_init(&host->notify, tifm_ms_req_work, (unsigned long)msh);
+ 
+ 	msh->request = tifm_ms_submit_req;
+ 	msh->set_param = tifm_ms_set_param;
+@@ -596,7 +597,7 @@ static void tifm_ms_remove(struct tifm_dev *sock)
+ 	unsigned long flags;
+ 
+ 	msh->request = tifm_ms_dummy_submit;
+-	tasklet_kill(&host->notify);
++	cancel_work_sync(&host->notify);
+ 	spin_lock_irqsave(&sock->lock, flags);
+ 	host->eject = 1;
+ 	if (host->req) {
+-- 
+2.17.1
+

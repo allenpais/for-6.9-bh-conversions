@@ -1,0 +1,77 @@
+From 63b159195cd2b84aaa12b924c1b71615988de165 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:13:14 +0000
+Subject: [PATCH 10/18] pci-hyperv: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/pci/pci-hyperv.c from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/pci/controller/pci-hyperv.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/pci/controller/pci-hyperv.c b/drivers/pci/controller/pci-hyperv.c
+index 1eaffff40b8d..48fd613bf032 100644
+--- a/drivers/pci/controller/pci-hyperv.c
++++ b/drivers/pci/controller/pci-hyperv.c
+@@ -1999,7 +1999,7 @@ static void hv_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
+ 		udelay(100);
+ 	}
+ 
+-	tasklet_enable(&channel->callback_event);
++	enable_and_queue_work(system_bh_wq, &channel->callback_event);
+ 
+ 	if (comp.comp_pkt.completion_status < 0) {
+ 		dev_err(&hbus->hdev->device,
+@@ -2025,7 +2025,7 @@ static void hv_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
+ 	return;
+ 
+ enable_tasklet:
+-	tasklet_enable(&channel->callback_event);
++	enable_and_queue_work(system_bh_wq, &channel->callback_event);
+ 	/*
+ 	 * The completion packet on the stack becomes invalid after 'return';
+ 	 * remove the ID from the VMbus requestor if the identifier is still
+@@ -3889,9 +3889,9 @@ static void hv_pci_remove(struct hv_device *hdev)
+ 
+ 	hbus = hv_get_drvdata(hdev);
+ 	if (hbus->state == hv_pcibus_installed) {
+-		tasklet_disable(&hdev->channel->callback_event);
++		disable_work_sync(&hdev->channel->callback_event);
+ 		hbus->state = hv_pcibus_removing;
+-		tasklet_enable(&hdev->channel->callback_event);
++		enable_and_queue_work(system_bh_wq, &hdev->channel->callback_event);
+ 		destroy_workqueue(hbus->wq);
+ 		hbus->wq = NULL;
+ 		/*
+@@ -3947,14 +3947,14 @@ static int hv_pci_suspend(struct hv_device *hdev)
+ 	 * it knows that no new work item can be scheduled, and then it flushes
+ 	 * hbus->wq and safely closes the vmbus channel.
+ 	 */
+-	tasklet_disable(&hdev->channel->callback_event);
++	disable_work_sync(&hdev->channel->callback_event);
+ 
+ 	/* Change the hbus state to prevent new work items. */
+ 	old_state = hbus->state;
+ 	if (hbus->state == hv_pcibus_installed)
+ 		hbus->state = hv_pcibus_removing;
+ 
+-	tasklet_enable(&hdev->channel->callback_event);
++	enable_and_queue_work(system_bh_wq, &hdev->channel->callback_event);
+ 
+ 	if (old_state != hv_pcibus_installed)
+ 		return -EINVAL;
+-- 
+2.17.1
+

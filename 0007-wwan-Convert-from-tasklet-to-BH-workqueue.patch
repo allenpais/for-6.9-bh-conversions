@@ -1,0 +1,206 @@
+From 7ce69c27143f8c4632166aafd6430798f032e811 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:08:42 +0000
+Subject: [PATCH 07/18] wwan:  Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/net/wwan/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/net/wwan/iosm/iosm_ipc_imem_ops.c   |  2 +-
+ drivers/net/wwan/iosm/iosm_ipc_mux_codec.h  |  2 +-
+ drivers/net/wwan/iosm/iosm_ipc_task_queue.c | 20 +++++++--------
+ drivers/net/wwan/iosm/iosm_ipc_task_queue.h | 28 ++++++++++-----------
+ 4 files changed, 26 insertions(+), 26 deletions(-)
+
+diff --git a/drivers/net/wwan/iosm/iosm_ipc_imem_ops.c b/drivers/net/wwan/iosm/iosm_ipc_imem_ops.c
+index 109cf8930488..1cc71761e0d8 100644
+--- a/drivers/net/wwan/iosm/iosm_ipc_imem_ops.c
++++ b/drivers/net/wwan/iosm/iosm_ipc_imem_ops.c
+@@ -37,7 +37,7 @@ void ipc_imem_sys_wwan_close(struct iosm_imem *ipc_imem, int if_id,
+ 		ipc_mux_close_session(ipc_imem->mux, if_id);
+ }
+ 
+-/* Tasklet call to do uplink transfer. */
++/* Work call to do uplink transfer. */
+ static int ipc_imem_tq_cdev_write(struct iosm_imem *ipc_imem, int arg,
+ 				  void *msg, size_t size)
+ {
+diff --git a/drivers/net/wwan/iosm/iosm_ipc_mux_codec.h b/drivers/net/wwan/iosm/iosm_ipc_mux_codec.h
+index f8df88f816c4..ef41b684fc10 100644
+--- a/drivers/net/wwan/iosm/iosm_ipc_mux_codec.h
++++ b/drivers/net/wwan/iosm/iosm_ipc_mux_codec.h
+@@ -301,7 +301,7 @@ void ipc_mux_netif_tx_flowctrl(struct mux_session *session, int idx, bool on);
+ int ipc_mux_ul_trigger_encode(struct iosm_mux *ipc_mux, int if_id,
+ 			      struct sk_buff *skb);
+ /**
+- * ipc_mux_ul_data_encode - UL encode function for calling from Tasklet context.
++ * ipc_mux_ul_data_encode - UL encode function for calling from Work context.
+  * @ipc_mux:	Pointer to MUX data-struct
+  *
+  * Returns: TRUE if any packet of any session is encoded FALSE otherwise.
+diff --git a/drivers/net/wwan/iosm/iosm_ipc_task_queue.c b/drivers/net/wwan/iosm/iosm_ipc_task_queue.c
+index 852a99166144..c4f94ebb12d5 100644
+--- a/drivers/net/wwan/iosm/iosm_ipc_task_queue.c
++++ b/drivers/net/wwan/iosm/iosm_ipc_task_queue.c
+@@ -6,7 +6,7 @@
+ #include "iosm_ipc_imem.h"
+ #include "iosm_ipc_task_queue.h"
+ 
+-/* Actual tasklet function, will be called whenever tasklet is scheduled.
++/* Actual work function, will be called whenever work is scheduled.
+  * Calls event handler involves callback for each element in the message queue
+  */
+ static void ipc_task_queue_handler(unsigned long data)
+@@ -80,7 +80,7 @@ ipc_task_queue_add_task(struct iosm_imem *ipc_imem,
+ 				    void *msg, size_t size),
+ 			size_t size, bool is_copy, bool wait)
+ {
+-	struct tasklet_struct *ipc_tasklet = ipc_imem->ipc_task->ipc_tasklet;
++	struct work_struct *ipc_work = ipc_imem->ipc_task->ipc_work;
+ 	struct ipc_task_queue *ipc_task = &ipc_imem->ipc_task->ipc_queue;
+ 	struct completion completion;
+ 	unsigned int pos, nextpos;
+@@ -89,7 +89,7 @@ ipc_task_queue_add_task(struct iosm_imem *ipc_imem,
+ 
+ 	init_completion(&completion);
+ 
+-	/* tasklet send may be called from both interrupt or thread
++	/* work send may be called from both interrupt or thread
+ 	 * context, therefore protect queue operation by spinlock
+ 	 */
+ 	spin_lock_irqsave(&ipc_task->q_lock, flags);
+@@ -124,7 +124,7 @@ ipc_task_queue_add_task(struct iosm_imem *ipc_imem,
+ 	spin_unlock_irqrestore(&ipc_task->q_lock, flags);
+ 
+ 	if (result == 0) {
+-		tasklet_schedule(ipc_tasklet);
++		queue_work(system_bh_wq, ipc_work);
+ 
+ 		if (wait) {
+ 			wait_for_completion(&completion);
+@@ -158,7 +158,7 @@ int ipc_task_queue_send_task(struct iosm_imem *imem,
+ 				      size, is_copy, wait);
+ 	if (ret < 0) {
+ 		dev_err(imem->ipc_task->dev,
+-			"add task failed for %ps %d, %p, %zu, %d", func, arg,
++			"add work failed for %ps %d, %p, %zu, %d", func, arg,
+ 			copy, size, is_copy);
+ 		if (is_copy)
+ 			kfree(copy);
+@@ -174,10 +174,10 @@ int ipc_task_init(struct ipc_task *ipc_task)
+ {
+ 	struct ipc_task_queue *ipc_queue = &ipc_task->ipc_queue;
+ 
+-	ipc_task->ipc_tasklet = kzalloc(sizeof(*ipc_task->ipc_tasklet),
++	ipc_task->ipc_work = kzalloc(sizeof(*ipc_task->ipc_work),
+ 					GFP_KERNEL);
+ 
+-	if (!ipc_task->ipc_tasklet)
++	if (!ipc_task->ipc_work)
+ 		return -ENOMEM;
+ 
+ 	/* Initialize the spinlock needed to protect the message queue of the
+@@ -185,16 +185,16 @@ int ipc_task_init(struct ipc_task *ipc_task)
+ 	 */
+ 	spin_lock_init(&ipc_queue->q_lock);
+ 
+-	tasklet_init(ipc_task->ipc_tasklet, ipc_task_queue_handler,
++	tasklet_init(ipc_task->ipc_work, ipc_task_queue_handler,
+ 		     (unsigned long)ipc_queue);
+ 	return 0;
+ }
+ 
+ void ipc_task_deinit(struct ipc_task *ipc_task)
+ {
+-	tasklet_kill(ipc_task->ipc_tasklet);
++	cancel_work_sync(ipc_task->ipc_work);
+ 
+-	kfree(ipc_task->ipc_tasklet);
++	kfree(ipc_task->ipc_work);
+ 	/* This will free/complete any outstanding messages,
+ 	 * without calling the actual handler
+ 	 */
+diff --git a/drivers/net/wwan/iosm/iosm_ipc_task_queue.h b/drivers/net/wwan/iosm/iosm_ipc_task_queue.h
+index df6e9cd925a9..a9085a09260a 100644
+--- a/drivers/net/wwan/iosm/iosm_ipc_task_queue.h
++++ b/drivers/net/wwan/iosm/iosm_ipc_task_queue.h
+@@ -14,15 +14,15 @@
+ /**
+  * struct ipc_task_queue_args - Struct for Task queue elements
+  * @ipc_imem:   Pointer to struct iosm_imem
+- * @msg:        Message argument for tasklet function. (optional, can be NULL)
+- * @completion: OS object used to wait for the tasklet function to finish for
++ * @msg:        Message argument for work function. (optional, can be NULL)
++ * @completion: OS object used to wait for the work function to finish for
+  *              synchronous calls
+- * @func:       Function to be called in tasklet (tl) context
+- * @arg:        Generic integer argument for tasklet function (optional)
+- * @size:       Message size argument for tasklet function (optional)
+- * @response:   Return code of tasklet function for synchronous calls
++ * @func:       Function to be called in work (tl) context
++ * @arg:        Generic integer argument for work function (optional)
++ * @size:       Message size argument for work function (optional)
++ * @response:   Return code of work function for synchronous calls
+  * @is_copy:    Is true if msg contains a pointer to a copy of the original msg
+- *              for async. calls that needs to be freed once the tasklet returns
++ *              for async. calls that needs to be freed once the work returns
+  */
+ struct ipc_task_queue_args {
+ 	struct iosm_imem *ipc_imem;
+@@ -53,34 +53,34 @@ struct ipc_task_queue {
+ /**
+  * struct ipc_task - Struct for Task
+  * @dev:	 Pointer to device structure
+- * @ipc_tasklet: Tasklet for serialized work offload
++ * @ipc_work: Work for serialized work offload
+  *		 from interrupts and OS callbacks
+- * @ipc_queue:	 Task for entry into ipc task queue
++ * @ipc_queue:	 Task for entry into ipc work queue
+  */
+ struct ipc_task {
+ 	struct device *dev;
+-	struct tasklet_struct *ipc_tasklet;
++	struct work_struct *ipc_work;
+ 	struct ipc_task_queue ipc_queue;
+ };
+ 
+ /**
+- * ipc_task_init - Allocate a tasklet
++ * ipc_task_init - Allocate a work
+  * @ipc_task:	Pointer to ipc_task structure
+  * Returns: 0 on success and failure value on error.
+  */
+ int ipc_task_init(struct ipc_task *ipc_task);
+ 
+ /**
+- * ipc_task_deinit - Free a tasklet, invalidating its pointer.
++ * ipc_task_deinit - Free a work, invalidating its pointer.
+  * @ipc_task:	Pointer to ipc_task structure
+  */
+ void ipc_task_deinit(struct ipc_task *ipc_task);
+ 
+ /**
+  * ipc_task_queue_send_task - Synchronously/Asynchronously call a function in
+- *			      tasklet context.
++ *			      work context.
+  * @imem:		Pointer to iosm_imem struct
+- * @func:		Function to be called in tasklet context
++ * @func:		Function to be called in work context
+  * @arg:		Integer argument for func
+  * @msg:		Message pointer argument for func
+  * @size:		Size argument for func
+-- 
+2.17.1
+

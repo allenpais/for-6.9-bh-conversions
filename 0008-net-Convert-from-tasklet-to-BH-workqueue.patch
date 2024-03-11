@@ -1,0 +1,1046 @@
+From ce563b2f748df4472be5ee14474b4b06b5748cbe Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:11:20 +0000
+Subject: [PATCH 08/18] net: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/net/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/net/caif/caif_virtio.c                | 15 +++++------
+ .../ethernet/cavium/thunder/nicvf_queues.c    |  1 +
+ drivers/net/ethernet/chelsio/cxgb4/sge.c      |  1 +
+ drivers/net/ethernet/jme.c                    |  1 +
+ drivers/net/ethernet/mellanox/mlx4/cq.c       |  1 +
+ drivers/net/ethernet/mellanox/mlx5/core/cq.c  |  1 +
+ drivers/net/ethernet/netronome/nfp/nfd3/dp.c  |  1 +
+ drivers/net/ethernet/netronome/nfp/nfdk/dp.c  |  1 +
+ drivers/net/ethernet/qlogic/qed/qed_int.c     |  1 +
+ drivers/net/ifb.c                             | 15 +++++------
+ drivers/net/ppp/ppp_async.c                   | 17 +++++++------
+ drivers/net/ppp/ppp_synctty.c                 | 17 +++++++------
+ drivers/net/usb/cdc_ncm.c                     | 13 +++++-----
+ drivers/net/usb/hso.c                         | 19 +++++++-------
+ drivers/net/usb/lan78xx.c                     |  2 +-
+ drivers/net/usb/pegasus.c                     | 15 +++++------
+ drivers/net/usb/pegasus.h                     |  2 +-
+ drivers/net/usb/rtl8150.c                     | 15 +++++------
+ drivers/net/usb/usbnet.c                      | 25 ++++++++++---------
+ drivers/net/wan/farsync.c                     | 15 +++++------
+ drivers/net/wan/hdlc_x25.c                    | 15 +++++------
+ drivers/net/wireless/ath/ath5k/base.c         |  1 +
+ drivers/net/wireless/ath/ath9k/beacon.c       |  1 +
+ drivers/net/wireless/ath/ath9k/main.c         |  1 +
+ .../broadcom/brcm80211/brcmsmac/mac80211_if.c |  1 +
+ .../net/wireless/intel/iwlegacy/3945-mac.c    |  1 +
+ .../net/wireless/intel/iwlegacy/4965-mac.c    |  1 +
+ .../net/wireless/ralink/rt2x00/rt2800mmio.c   |  1 +
+ 28 files changed, 113 insertions(+), 87 deletions(-)
+
+diff --git a/drivers/net/caif/caif_virtio.c b/drivers/net/caif/caif_virtio.c
+index 0b0f234b0b50..4ac71d6ca92f 100644
+--- a/drivers/net/caif/caif_virtio.c
++++ b/drivers/net/caif/caif_virtio.c
+@@ -21,6 +21,7 @@
+ #include <linux/dma-mapping.h>
+ #include <net/caif/caif_dev.h>
+ #include <linux/virtio_config.h>
++#include <linux/workqueue.h>
+ 
+ MODULE_LICENSE("GPL v2");
+ MODULE_AUTHOR("Vicram Arv");
+@@ -80,7 +81,7 @@ struct cfv_stats {
+  * @watermark_tx: indicates number of free descriptors we need
+  *		to reopen the tx-queues after overload.
+  * @tx_lock:	protects vq_tx from concurrent use
+- * @tx_release_tasklet: Tasklet for freeing consumed TX buffers
++ * @tx_release_work: Work for freeing consumed TX buffers
+  * @napi:       Napi context used in cfv_rx_poll()
+  * @ctx:        Context data used in cfv_rx_poll()
+  * @tx_hr:	transmit headroom
+@@ -107,7 +108,7 @@ struct cfv_info {
+ 	unsigned int watermark_tx;
+ 	/* Protect access to vq_tx */
+ 	spinlock_t tx_lock;
+-	struct tasklet_struct tx_release_tasklet;
++	struct work_struct tx_release_work;
+ 	struct napi_struct napi;
+ 	struct cfv_napi_context ctx;
+ 	u16 tx_hr;
+@@ -142,7 +143,7 @@ static void cfv_release_cb(struct virtqueue *vq_tx)
+ 	struct cfv_info *cfv = vq_tx->vdev->priv;
+ 
+ 	++cfv->stats.tx_kicks;
+-	tasklet_schedule(&cfv->tx_release_tasklet);
++	queue_work(system_bh_wq, &cfv->tx_release_work);
+ }
+ 
+ static void free_buf_info(struct cfv_info *cfv, struct buf_info *buf_info)
+@@ -598,9 +599,9 @@ static netdev_tx_t cfv_netdev_tx(struct sk_buff *skb, struct net_device *netdev)
+ 	return NETDEV_TX_OK;
+ }
+ 
+-static void cfv_tx_release_tasklet(struct tasklet_struct *t)
++static void cfv_tx_release_work(struct work_struct *t)
+ {
+-	struct cfv_info *cfv = from_tasklet(cfv, t, tx_release_tasklet);
++	struct cfv_info *cfv = from_work(cfv, t, tx_release_work);
+ 	cfv_release_used_buf(cfv->vq_tx);
+ }
+ 
+@@ -717,7 +718,7 @@ static int cfv_probe(struct virtio_device *vdev)
+ 	netif_napi_add_weight(netdev, &cfv->napi, cfv_rx_poll,
+ 			      CFV_DEFAULT_QUOTA);
+ 
+-	tasklet_setup(&cfv->tx_release_tasklet, cfv_tx_release_tasklet);
++	INIT_WORK(&cfv->tx_release_work, cfv_tx_release_work);
+ 
+ 	/* Carrier is off until netdevice is opened */
+ 	netif_carrier_off(netdev);
+@@ -759,7 +760,7 @@ static void cfv_remove(struct virtio_device *vdev)
+ 	dev_close(cfv->ndev);
+ 	rtnl_unlock();
+ 
+-	tasklet_kill(&cfv->tx_release_tasklet);
++	cancel_work_sync(&cfv->tx_release_work);
+ 	debugfs_remove_recursive(cfv->debugfs);
+ 
+ 	vringh_kiov_cleanup(&cfv->ctx.riov);
+diff --git a/drivers/net/ethernet/cavium/thunder/nicvf_queues.c b/drivers/net/ethernet/cavium/thunder/nicvf_queues.c
+index c816b497f5c5..a0f603014ee6 100644
+--- a/drivers/net/ethernet/cavium/thunder/nicvf_queues.c
++++ b/drivers/net/ethernet/cavium/thunder/nicvf_queues.c
+@@ -9,6 +9,7 @@
+ #include <linux/etherdevice.h>
+ #include <linux/iommu.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ #include <net/ip.h>
+ #include <net/tso.h>
+ #include <uapi/linux/bpf.h>
+diff --git a/drivers/net/ethernet/chelsio/cxgb4/sge.c b/drivers/net/ethernet/chelsio/cxgb4/sge.c
+index 8f49d50b2fc3..c3c5fcb75259 100644
+--- a/drivers/net/ethernet/chelsio/cxgb4/sge.c
++++ b/drivers/net/ethernet/chelsio/cxgb4/sge.c
+@@ -42,6 +42,7 @@
+ #include <linux/prefetch.h>
+ #include <linux/export.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ #include <net/xfrm.h>
+ #include <net/ipv6.h>
+ #include <net/tcp.h>
+diff --git a/drivers/net/ethernet/jme.c b/drivers/net/ethernet/jme.c
+index 71fc06b9b13e..45ac762d25f7 100644
+--- a/drivers/net/ethernet/jme.c
++++ b/drivers/net/ethernet/jme.c
+@@ -30,6 +30,7 @@
+ #include <linux/slab.h>
+ #include <linux/jiffies.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ #include <net/ip6_checksum.h>
+ #include "jme.h"
+ 
+diff --git a/drivers/net/ethernet/mellanox/mlx4/cq.c b/drivers/net/ethernet/mellanox/mlx4/cq.c
+index e99820182ed5..d60a69b77162 100644
+--- a/drivers/net/ethernet/mellanox/mlx4/cq.c
++++ b/drivers/net/ethernet/mellanox/mlx4/cq.c
+@@ -40,6 +40,7 @@
+ #include <linux/mlx4/cmd.h>
+ #include <linux/mlx4/cq.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ 
+ #include "mlx4.h"
+ #include "icm.h"
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/cq.c b/drivers/net/ethernet/mellanox/mlx5/core/cq.c
+index 3453087485f4..245f33924e3d 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/cq.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/cq.c
+@@ -36,6 +36,7 @@
+ #include <rdma/ib_verbs.h>
+ #include <linux/mlx5/cq.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ #include "mlx5_core.h"
+ #include "lib/eq.h"
+ 
+diff --git a/drivers/net/ethernet/netronome/nfp/nfd3/dp.c b/drivers/net/ethernet/netronome/nfp/nfd3/dp.c
+index 7a7b696f54e0..a7e1e9762164 100644
+--- a/drivers/net/ethernet/netronome/nfp/nfd3/dp.c
++++ b/drivers/net/ethernet/netronome/nfp/nfd3/dp.c
+@@ -5,6 +5,7 @@
+ #include <linux/netdevice.h>
+ #include <linux/bitfield.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ #include <net/xfrm.h>
+ 
+ #include "../nfp_app.h"
+diff --git a/drivers/net/ethernet/netronome/nfp/nfdk/dp.c b/drivers/net/ethernet/netronome/nfp/nfdk/dp.c
+index 9d9942c05b2e..1f109daca12c 100644
+--- a/drivers/net/ethernet/netronome/nfp/nfdk/dp.c
++++ b/drivers/net/ethernet/netronome/nfp/nfdk/dp.c
+@@ -7,6 +7,7 @@
+ #include <linux/sizes.h>
+ #include <linux/bitfield.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ #include <net/xfrm.h>
+ 
+ #include "../nfp_app.h"
+diff --git a/drivers/net/ethernet/qlogic/qed/qed_int.c b/drivers/net/ethernet/qlogic/qed/qed_int.c
+index 9d30a356a76c..6dee2044ae87 100644
+--- a/drivers/net/ethernet/qlogic/qed/qed_int.c
++++ b/drivers/net/ethernet/qlogic/qed/qed_int.c
+@@ -17,6 +17,7 @@
+ #include <linux/slab.h>
+ #include <linux/string.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ #include "qed.h"
+ #include "qed_hsi.h"
+ #include "qed_hw.h"
+diff --git a/drivers/net/ifb.c b/drivers/net/ifb.c
+index 2c1b5def4a0b..2c36945ddaed 100644
+--- a/drivers/net/ifb.c
++++ b/drivers/net/ifb.c
+@@ -33,6 +33,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/moduleparam.h>
+ #include <linux/netfilter_netdev.h>
++#include <linux/workqueue.h>
+ #include <net/pkt_sched.h>
+ #include <net/net_namespace.h>
+ 
+@@ -46,7 +47,7 @@ struct ifb_q_stats {
+ 
+ struct ifb_q_private {
+ 	struct net_device	*dev;
+-	struct tasklet_struct   ifb_tasklet;
++	struct work_struct ifb_work;
+ 	int			tasklet_pending;
+ 	int			txqnum;
+ 	struct sk_buff_head     rq;
+@@ -86,9 +87,9 @@ static void ifb_update_q_stats(struct ifb_q_stats *stats, int len)
+ 	u64_stats_update_end(&stats->sync);
+ }
+ 
+-static void ifb_ri_tasklet(struct tasklet_struct *t)
++static void ifb_ri_work(struct work_struct *t)
+ {
+-	struct ifb_q_private *txp = from_tasklet(txp, t, ifb_tasklet);
++	struct ifb_q_private *txp = from_work(txp, t, ifb_work);
+ 	struct netdev_queue *txq;
+ 	struct sk_buff *skb;
+ 
+@@ -146,7 +147,7 @@ static void ifb_ri_tasklet(struct tasklet_struct *t)
+ 	} else {
+ resched:
+ 		txp->tasklet_pending = 1;
+-		tasklet_schedule(&txp->ifb_tasklet);
++		queue_work(system_bh_wq, &txp->ifb_work);
+ 	}
+ 
+ }
+@@ -198,7 +199,7 @@ static int ifb_dev_init(struct net_device *dev)
+ 		__skb_queue_head_init(&txp->tq);
+ 		u64_stats_init(&txp->rx_stats.sync);
+ 		u64_stats_init(&txp->tx_stats.sync);
+-		tasklet_setup(&txp->ifb_tasklet, ifb_ri_tasklet);
++		INIT_WORK(&txp->ifb_work, ifb_ri_work);
+ 		netif_tx_start_queue(netdev_get_tx_queue(dev, i));
+ 	}
+ 	return 0;
+@@ -300,7 +301,7 @@ static void ifb_dev_free(struct net_device *dev)
+ 	int i;
+ 
+ 	for (i = 0; i < dev->num_tx_queues; i++,txp++) {
+-		tasklet_kill(&txp->ifb_tasklet);
++		cancel_work_sync(&txp->ifb_work);
+ 		__skb_queue_purge(&txp->rq);
+ 		__skb_queue_purge(&txp->tq);
+ 	}
+@@ -354,7 +355,7 @@ static netdev_tx_t ifb_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	__skb_queue_tail(&txp->rq, skb);
+ 	if (!txp->tasklet_pending) {
+ 		txp->tasklet_pending = 1;
+-		tasklet_schedule(&txp->ifb_tasklet);
++		queue_work(system_bh_wq, &txp->ifb_work);
+ 	}
+ 
+ 	return NETDEV_TX_OK;
+diff --git a/drivers/net/ppp/ppp_async.c b/drivers/net/ppp/ppp_async.c
+index 840da924708b..7482d032d6e8 100644
+--- a/drivers/net/ppp/ppp_async.c
++++ b/drivers/net/ppp/ppp_async.c
+@@ -31,6 +31,7 @@
+ #include <linux/slab.h>
+ #include <asm/unaligned.h>
+ #include <linux/uaccess.h>
++#include <linux/workqueue.h>
+ #include <asm/string.h>
+ 
+ #define PPP_VERSION	"2.4.2"
+@@ -63,7 +64,7 @@ struct asyncppp {
+ 	int		lcp_fcs;
+ 	struct sk_buff_head rqueue;
+ 
+-	struct tasklet_struct tsk;
++	struct work_struct tsk;
+ 
+ 	refcount_t	refcnt;
+ 	struct completion dead;
+@@ -101,7 +102,7 @@ static void ppp_async_input(struct asyncppp *ap, const unsigned char *buf,
+ 			    const u8 *flags, int count);
+ static int ppp_async_ioctl(struct ppp_channel *chan, unsigned int cmd,
+ 			   unsigned long arg);
+-static void ppp_async_process(struct tasklet_struct *t);
++static void ppp_async_process(struct work_struct *t);
+ 
+ static void async_lcp_peek(struct asyncppp *ap, unsigned char *data,
+ 			   int len, int inbound);
+@@ -179,7 +180,7 @@ ppp_asynctty_open(struct tty_struct *tty)
+ 	ap->lcp_fcs = -1;
+ 
+ 	skb_queue_head_init(&ap->rqueue);
+-	tasklet_setup(&ap->tsk, ppp_async_process);
++	INIT_WORK(&ap->tsk, ppp_async_process);
+ 
+ 	refcount_set(&ap->refcnt, 1);
+ 	init_completion(&ap->dead);
+@@ -232,7 +233,7 @@ ppp_asynctty_close(struct tty_struct *tty)
+ 	 */
+ 	if (!refcount_dec_and_test(&ap->refcnt))
+ 		wait_for_completion(&ap->dead);
+-	tasklet_kill(&ap->tsk);
++	cancel_work_sync(&ap->tsk);
+ 
+ 	ppp_unregister_channel(&ap->chan);
+ 	kfree_skb(ap->rpkt);
+@@ -341,7 +342,7 @@ ppp_asynctty_receive(struct tty_struct *tty, const u8 *buf, const u8 *cflags,
+ 	ppp_async_input(ap, buf, cflags, count);
+ 	spin_unlock_irqrestore(&ap->recv_lock, flags);
+ 	if (!skb_queue_empty(&ap->rqueue))
+-		tasklet_schedule(&ap->tsk);
++		queue_work(system_bh_wq, &ap->tsk);
+ 	ap_put(ap);
+ 	tty_unthrottle(tty);
+ }
+@@ -355,7 +356,7 @@ ppp_asynctty_wakeup(struct tty_struct *tty)
+ 	if (!ap)
+ 		return;
+ 	set_bit(XMIT_WAKEUP, &ap->xmit_flags);
+-	tasklet_schedule(&ap->tsk);
++	queue_work(system_bh_wq, &ap->tsk);
+ 	ap_put(ap);
+ }
+ 
+@@ -478,9 +479,9 @@ ppp_async_ioctl(struct ppp_channel *chan, unsigned int cmd, unsigned long arg)
+  * to the ppp_generic code, and to tell the ppp_generic code
+  * if we can accept more output now.
+  */
+-static void ppp_async_process(struct tasklet_struct *t)
++static void ppp_async_process(struct work_struct *t)
+ {
+-	struct asyncppp *ap = from_tasklet(ap, t, tsk);
++	struct asyncppp *ap = from_work(ap, t, tsk);
+ 	struct sk_buff *skb;
+ 
+ 	/* process received packets */
+diff --git a/drivers/net/ppp/ppp_synctty.c b/drivers/net/ppp/ppp_synctty.c
+index 52d05ce4a281..1a7505619cd6 100644
+--- a/drivers/net/ppp/ppp_synctty.c
++++ b/drivers/net/ppp/ppp_synctty.c
+@@ -45,6 +45,7 @@
+ #include <linux/refcount.h>
+ #include <asm/unaligned.h>
+ #include <linux/uaccess.h>
++#include <linux/workqueue.h>
+ 
+ #define PPP_VERSION	"2.4.2"
+ 
+@@ -67,7 +68,7 @@ struct syncppp {
+ 
+ 	struct sk_buff_head rqueue;
+ 
+-	struct tasklet_struct tsk;
++	struct work_struct tsk;
+ 
+ 	refcount_t	refcnt;
+ 	struct completion dead_cmp;
+@@ -90,7 +91,7 @@ static struct sk_buff* ppp_sync_txmunge(struct syncppp *ap, struct sk_buff *);
+ static int ppp_sync_send(struct ppp_channel *chan, struct sk_buff *skb);
+ static int ppp_sync_ioctl(struct ppp_channel *chan, unsigned int cmd,
+ 			  unsigned long arg);
+-static void ppp_sync_process(struct tasklet_struct *t);
++static void ppp_sync_process(struct work_struct *t);
+ static int ppp_sync_push(struct syncppp *ap);
+ static void ppp_sync_flush_output(struct syncppp *ap);
+ static void ppp_sync_input(struct syncppp *ap, const u8 *buf, const u8 *flags,
+@@ -177,7 +178,7 @@ ppp_sync_open(struct tty_struct *tty)
+ 	ap->raccm = ~0U;
+ 
+ 	skb_queue_head_init(&ap->rqueue);
+-	tasklet_setup(&ap->tsk, ppp_sync_process);
++	INIT_WORK(&ap->tsk, ppp_sync_process);
+ 
+ 	refcount_set(&ap->refcnt, 1);
+ 	init_completion(&ap->dead_cmp);
+@@ -231,7 +232,7 @@ ppp_sync_close(struct tty_struct *tty)
+ 	 */
+ 	if (!refcount_dec_and_test(&ap->refcnt))
+ 		wait_for_completion(&ap->dead_cmp);
+-	tasklet_kill(&ap->tsk);
++	cancel_work_sync(&ap->tsk);
+ 
+ 	ppp_unregister_channel(&ap->chan);
+ 	skb_queue_purge(&ap->rqueue);
+@@ -334,7 +335,7 @@ ppp_sync_receive(struct tty_struct *tty, const u8 *buf, const u8 *cflags,
+ 	ppp_sync_input(ap, buf, cflags, count);
+ 	spin_unlock_irqrestore(&ap->recv_lock, flags);
+ 	if (!skb_queue_empty(&ap->rqueue))
+-		tasklet_schedule(&ap->tsk);
++		queue_work(system_bh_wq, &ap->tsk);
+ 	sp_put(ap);
+ 	tty_unthrottle(tty);
+ }
+@@ -348,7 +349,7 @@ ppp_sync_wakeup(struct tty_struct *tty)
+ 	if (!ap)
+ 		return;
+ 	set_bit(XMIT_WAKEUP, &ap->xmit_flags);
+-	tasklet_schedule(&ap->tsk);
++	queue_work(system_bh_wq, &ap->tsk);
+ 	sp_put(ap);
+ }
+ 
+@@ -474,9 +475,9 @@ ppp_sync_ioctl(struct ppp_channel *chan, unsigned int cmd, unsigned long arg)
+  * to the ppp_generic code, and to tell the ppp_generic code
+  * if we can accept more output now.
+  */
+-static void ppp_sync_process(struct tasklet_struct *t)
++static void ppp_sync_process(struct work_struct *t)
+ {
+-	struct syncppp *ap = from_tasklet(ap, t, tsk);
++	struct syncppp *ap = from_work(ap, t, tsk);
+ 	struct sk_buff *skb;
+ 
+ 	/* process received packets */
+diff --git a/drivers/net/usb/cdc_ncm.c b/drivers/net/usb/cdc_ncm.c
+index db05622f1f70..0039bd9ba27b 100644
+--- a/drivers/net/usb/cdc_ncm.c
++++ b/drivers/net/usb/cdc_ncm.c
+@@ -53,6 +53,7 @@
+ #include <linux/usb/usbnet.h>
+ #include <linux/usb/cdc.h>
+ #include <linux/usb/cdc_ncm.h>
++#include <linux/workqueue.h>
+ 
+ #if IS_ENABLED(CONFIG_USB_NET_CDC_MBIM)
+ static bool prefer_mbim = true;
+@@ -62,7 +63,7 @@ static bool prefer_mbim;
+ module_param(prefer_mbim, bool, 0644);
+ MODULE_PARM_DESC(prefer_mbim, "Prefer MBIM setting on dual NCM/MBIM functions");
+ 
+-static void cdc_ncm_txpath_bh(struct tasklet_struct *t);
++static void cdc_ncm_txpath_bh(struct work_struct *t);
+ static void cdc_ncm_tx_timeout_start(struct cdc_ncm_ctx *ctx);
+ static enum hrtimer_restart cdc_ncm_tx_timer_cb(struct hrtimer *hr_timer);
+ static struct usb_driver cdc_ncm_driver;
+@@ -835,7 +836,7 @@ int cdc_ncm_bind_common(struct usbnet *dev, struct usb_interface *intf, u8 data_
+ 
+ 	hrtimer_init(&ctx->tx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 	ctx->tx_timer.function = &cdc_ncm_tx_timer_cb;
+-	tasklet_setup(&ctx->bh, cdc_ncm_txpath_bh);
++	INIT_WORK(&ctx->bh, cdc_ncm_txpath_bh);
+ 	atomic_set(&ctx->stop, 0);
+ 	spin_lock_init(&ctx->mtx);
+ 
+@@ -1003,7 +1004,7 @@ void cdc_ncm_unbind(struct usbnet *dev, struct usb_interface *intf)
+ 
+ 	hrtimer_cancel(&ctx->tx_timer);
+ 
+-	tasklet_kill(&ctx->bh);
++	cancel_work_sync(&ctx->bh);
+ 
+ 	/* handle devices with combined control and data interface */
+ 	if (ctx->control == ctx->data)
+@@ -1490,13 +1491,13 @@ static enum hrtimer_restart cdc_ncm_tx_timer_cb(struct hrtimer *timer)
+ 			container_of(timer, struct cdc_ncm_ctx, tx_timer);
+ 
+ 	if (!atomic_read(&ctx->stop))
+-		tasklet_schedule(&ctx->bh);
++		queue_work(system_bh_wq, &ctx->bh);
+ 	return HRTIMER_NORESTART;
+ }
+ 
+-static void cdc_ncm_txpath_bh(struct tasklet_struct *t)
++static void cdc_ncm_txpath_bh(struct work_struct *t)
+ {
+-	struct cdc_ncm_ctx *ctx = from_tasklet(ctx, t, bh);
++	struct cdc_ncm_ctx *ctx = from_work(ctx, t, bh);
+ 	struct usbnet *dev = ctx->dev;
+ 
+ 	spin_lock(&ctx->mtx);
+diff --git a/drivers/net/usb/hso.c b/drivers/net/usb/hso.c
+index 83b8452220ec..d1ff1ebc1319 100644
+--- a/drivers/net/usb/hso.c
++++ b/drivers/net/usb/hso.c
+@@ -58,6 +58,7 @@
+ #include <asm/byteorder.h>
+ #include <linux/serial_core.h>
+ #include <linux/serial.h>
++#include <linux/workqueue.h>
+ 
+ 
+ #define MOD_AUTHOR			"Option Wireless"
+@@ -235,7 +236,7 @@ struct hso_serial {
+ 	 */
+ 	int  curr_rx_urb_idx;
+ 	u8   rx_urb_filled[MAX_RX_URBS];
+-	struct tasklet_struct unthrottle_tasklet;
++	struct work_struct unthrottle_work;
+ };
+ 
+ struct hso_device {
+@@ -1207,13 +1208,13 @@ static void hso_std_serial_read_bulk_callback(struct urb *urb)
+ }
+ 
+ /*
+- * This needs to be a tasklet otherwise we will
++ * This needs to be a work otherwise we will
+  * end up recursively calling this function.
+  */
+-static void hso_unthrottle_tasklet(struct tasklet_struct *t)
++static void hso_unthrottle_work(struct work_struct *t)
+ {
+-	struct hso_serial *serial = from_tasklet(serial, t,
+-						 unthrottle_tasklet);
++	struct hso_serial *serial = from_work(serial, t,
++						 unthrottle_work);
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&serial->serial_lock, flags);
+@@ -1228,7 +1229,7 @@ static	void hso_unthrottle(struct tty_struct *tty)
+ {
+ 	struct hso_serial *serial = tty->driver_data;
+ 
+-	tasklet_hi_schedule(&serial->unthrottle_tasklet);
++	queue_work(system_bh_highpri_wq, &serial->unthrottle_work);
+ }
+ 
+ /* open the requested serial port */
+@@ -1262,8 +1263,8 @@ static int hso_serial_open(struct tty_struct *tty, struct file *filp)
+ 		serial->rx_state = RX_IDLE;
+ 		/* Force default termio settings */
+ 		_hso_serial_set_termios(tty);
+-		tasklet_setup(&serial->unthrottle_tasklet,
+-			      hso_unthrottle_tasklet);
++		tasklet_setup(&serial->unthrottle_work,
++			      hso_unthrottle_work);
+ 		result = hso_start_serial_device(serial->parent, GFP_KERNEL);
+ 		if (result) {
+ 			hso_stop_serial_device(serial->parent);
+@@ -1312,7 +1313,7 @@ static void hso_serial_close(struct tty_struct *tty, struct file *filp)
+ 		tty_port_tty_set(&serial->port, NULL);
+ 		if (!usb_gone)
+ 			hso_stop_serial_device(serial->parent);
+-		tasklet_kill(&serial->unthrottle_tasklet);
++		cancel_work_sync(&serial->unthrottle_work);
+ 	}
+ 
+ 	if (!usb_gone)
+diff --git a/drivers/net/usb/lan78xx.c b/drivers/net/usb/lan78xx.c
+index a6d653ff552a..0179c70b48a1 100644
+--- a/drivers/net/usb/lan78xx.c
++++ b/drivers/net/usb/lan78xx.c
+@@ -1507,7 +1507,7 @@ static int lan78xx_link_reset(struct lan78xx_net *dev)
+ 	return 0;
+ }
+ 
+-/* some work can't be done in tasklets, so we use keventd
++/* some work can't be done in works, so we use keventd
+  *
+  * NOTE:  annoying asymmetry:  if it's active, schedule_work() fails,
+  * but tasklet_schedule() doesn't.	hope the failure is rare.
+diff --git a/drivers/net/usb/pegasus.c b/drivers/net/usb/pegasus.c
+index 81ca64debc5b..1fe021552da2 100644
+--- a/drivers/net/usb/pegasus.c
++++ b/drivers/net/usb/pegasus.c
+@@ -16,6 +16,7 @@
+ #include <linux/module.h>
+ #include <asm/byteorder.h>
+ #include <linux/uaccess.h>
++#include <linux/workqueue.h>
+ #include "pegasus.h"
+ 
+ /*
+@@ -559,12 +560,12 @@ static void read_bulk_callback(struct urb *urb)
+ 	return;
+ 
+ tl_sched:
+-	tasklet_schedule(&pegasus->rx_tl);
++	queue_work(system_bh_wq, &pegasus->rx_tl);
+ }
+ 
+-static void rx_fixup(struct tasklet_struct *t)
++static void rx_fixup(struct work_struct *t)
+ {
+-	pegasus_t *pegasus = from_tasklet(pegasus, t, rx_tl);
++	pegasus_t *pegasus = from_work(pegasus, t, rx_tl);
+ 	int status;
+ 
+ 	if (pegasus->flags & PEGASUS_UNPLUG)
+@@ -579,7 +580,7 @@ static void rx_fixup(struct tasklet_struct *t)
+ 							      GFP_ATOMIC);
+ 	if (pegasus->rx_skb == NULL) {
+ 		netif_warn(pegasus, rx_err, pegasus->net, "low on memory\n");
+-		tasklet_schedule(&pegasus->rx_tl);
++		queue_work(system_bh_wq, &pegasus->rx_tl);
+ 		return;
+ 	}
+ 	usb_fill_bulk_urb(pegasus->rx_urb, pegasus->usb,
+@@ -592,7 +593,7 @@ static void rx_fixup(struct tasklet_struct *t)
+ 		netif_device_detach(pegasus->net);
+ 	else if (status) {
+ 		pegasus->flags |= PEGASUS_RX_URB_FAIL;
+-		tasklet_schedule(&pegasus->rx_tl);
++		queue_work(system_bh_wq, &pegasus->rx_tl);
+ 	} else {
+ 		pegasus->flags &= ~PEGASUS_RX_URB_FAIL;
+ 	}
+@@ -883,7 +884,7 @@ static int pegasus_close(struct net_device *net)
+ 	netif_stop_queue(net);
+ 	if (!(pegasus->flags & PEGASUS_UNPLUG))
+ 		disable_net_traffic(pegasus);
+-	tasklet_kill(&pegasus->rx_tl);
++	cancel_work_sync(&pegasus->rx_tl);
+ 	unlink_all_urbs(pegasus);
+ 
+ 	return 0;
+@@ -1151,7 +1152,7 @@ static int pegasus_probe(struct usb_interface *intf,
+ 		goto out1;
+ 	}
+ 
+-	tasklet_setup(&pegasus->rx_tl, rx_fixup);
++	INIT_WORK(&pegasus->rx_tl, rx_fixup);
+ 
+ 	INIT_DELAYED_WORK(&pegasus->carrier_check, check_carrier);
+ 
+diff --git a/drivers/net/usb/pegasus.h b/drivers/net/usb/pegasus.h
+index a05b143155ba..bffb913b1771 100644
+--- a/drivers/net/usb/pegasus.h
++++ b/drivers/net/usb/pegasus.h
+@@ -87,7 +87,7 @@ typedef struct pegasus {
+ 	u32			wolopts;
+ 	int			dev_index;
+ 	int			intr_interval;
+-	struct tasklet_struct	rx_tl;
++	struct work_struct 	rx_tl;
+ 	struct delayed_work	carrier_check;
+ 	struct urb		*rx_urb, *tx_urb, *intr_urb;
+ 	struct sk_buff		*rx_skb;
+diff --git a/drivers/net/usb/rtl8150.c b/drivers/net/usb/rtl8150.c
+index 97afd7335d86..f400c949e5f2 100644
+--- a/drivers/net/usb/rtl8150.c
++++ b/drivers/net/usb/rtl8150.c
+@@ -12,6 +12,7 @@
+ #include <linux/ethtool.h>
+ #include <linux/usb.h>
+ #include <linux/uaccess.h>
++#include <linux/workqueue.h>
+ 
+ /* Version Information */
+ #define DRIVER_VERSION "v0.6.2 (2004/08/27)"
+@@ -124,7 +125,7 @@ MODULE_DEVICE_TABLE(usb, rtl8150_table);
+ struct rtl8150 {
+ 	unsigned long flags;
+ 	struct usb_device *udev;
+-	struct tasklet_struct tl;
++	struct work_struct tl;
+ 	struct net_device *netdev;
+ 	struct urb *rx_urb, *tx_urb, *intr_urb;
+ 	struct sk_buff *tx_skb, *rx_skb;
+@@ -438,7 +439,7 @@ static void read_bulk_callback(struct urb *urb)
+ 
+ 	return;
+ resched:
+-	tasklet_schedule(&dev->tl);
++	queue_work(system_bh_wq, &dev->tl);
+ }
+ 
+ static void write_bulk_callback(struct urb *urb)
+@@ -577,9 +578,9 @@ static void free_skb_pool(rtl8150_t *dev)
+ 		dev_kfree_skb(dev->rx_skb_pool[i]);
+ }
+ 
+-static void rx_fixup(struct tasklet_struct *t)
++static void rx_fixup(struct work_struct *t)
+ {
+-	struct rtl8150 *dev = from_tasklet(dev, t, tl);
++	struct rtl8150 *dev = from_work(dev, t, tl);
+ 	struct sk_buff *skb;
+ 	int status;
+ 
+@@ -610,7 +611,7 @@ static void rx_fixup(struct tasklet_struct *t)
+ 
+ 	return;
+ tlsched:
+-	tasklet_schedule(&dev->tl);
++	queue_work(system_bh_wq, &dev->tl);
+ }
+ 
+ static int enable_net_traffic(rtl8150_t * dev)
+@@ -879,7 +880,7 @@ static int rtl8150_probe(struct usb_interface *intf,
+ 		return -ENOMEM;
+ 	}
+ 
+-	tasklet_setup(&dev->tl, rx_fixup);
++	INIT_WORK(&dev->tl, rx_fixup);
+ 	spin_lock_init(&dev->rx_pool_lock);
+ 
+ 	dev->udev = udev;
+@@ -929,7 +930,7 @@ static void rtl8150_disconnect(struct usb_interface *intf)
+ 	usb_set_intfdata(intf, NULL);
+ 	if (dev) {
+ 		set_bit(RTL8150_UNPLUG, &dev->flags);
+-		tasklet_kill(&dev->tl);
++		cancel_work_sync(&dev->tl);
+ 		unregister_netdev(dev->netdev);
+ 		unlink_all_urbs(dev);
+ 		free_all_urbs(dev);
+diff --git a/drivers/net/usb/usbnet.c b/drivers/net/usb/usbnet.c
+index 2d14b0d78541..5848735be31e 100644
+--- a/drivers/net/usb/usbnet.c
++++ b/drivers/net/usb/usbnet.c
+@@ -30,6 +30,7 @@
+ #include <linux/slab.h>
+ #include <linux/kernel.h>
+ #include <linux/pm_runtime.h>
++#include <linux/workqueue.h>
+ 
+ /*-------------------------------------------------------------------------*/
+ 
+@@ -453,16 +454,16 @@ static enum skb_state defer_bh(struct usbnet *dev, struct sk_buff *skb,
+ 
+ 	__skb_queue_tail(&dev->done, skb);
+ 	if (dev->done.qlen == 1)
+-		tasklet_schedule(&dev->bh);
++		queue_work(system_bh_wq, &dev->bh);
+ 	spin_unlock(&dev->done.lock);
+ 	spin_unlock_irqrestore(&list->lock, flags);
+ 	return old_state;
+ }
+ 
+-/* some work can't be done in tasklets, so we use keventd
++/* some work can't be done in works, so we use keventd
+  *
+  * NOTE:  annoying asymmetry:  if it's active, schedule_work() fails,
+- * but tasklet_schedule() doesn't.  hope the failure is rare.
++ * but queue_work(system_bh_wq, ) doesn't.  hope the failure is rare.
+  */
+ void usbnet_defer_kevent (struct usbnet *dev, int work)
+ {
+@@ -695,7 +696,7 @@ void usbnet_resume_rx(struct usbnet *dev)
+ 		num++;
+ 	}
+ 
+-	tasklet_schedule(&dev->bh);
++	queue_work(system_bh_wq, &dev->bh);
+ 
+ 	netif_dbg(dev, rx_status, dev->net,
+ 		  "paused rx queue disabled, %d skbs requeued\n", num);
+@@ -764,7 +765,7 @@ void usbnet_unlink_rx_urbs(struct usbnet *dev)
+ {
+ 	if (netif_running(dev->net)) {
+ 		(void) unlink_urbs (dev, &dev->rxq);
+-		tasklet_schedule(&dev->bh);
++		queue_work(system_bh_wq, &dev->bh);
+ 	}
+ }
+ EXPORT_SYMBOL_GPL(usbnet_unlink_rx_urbs);
+@@ -844,7 +845,7 @@ int usbnet_stop (struct net_device *net)
+ 
+ 	mpn = !test_and_clear_bit(EVENT_NO_RUNTIME_PM, &dev->flags);
+ 
+-	/* deferred work (timer, softirq, task) must also stop */
++	/* deferred work (timer, softirq, work) must also stop */
+ 	dev->flags = 0;
+ 	del_timer_sync (&dev->delay);
+ 	tasklet_kill (&dev->bh);
+@@ -1100,7 +1101,7 @@ static void __handle_link_change(struct usbnet *dev)
+ 		 */
+ 	} else {
+ 		/* submitting URBs for reading packets */
+-		tasklet_schedule(&dev->bh);
++		queue_work(system_bh_wq, &dev->bh);
+ 	}
+ 
+ 	/* hard_mtu or rx_urb_size may change during link change */
+@@ -1178,7 +1179,7 @@ usbnet_deferred_kevent (struct work_struct *work)
+ 		}
+ 	}
+ 
+-	/* tasklet could resubmit itself forever if memory is tight */
++	/* work could resubmit itself forever if memory is tight */
+ 	if (test_bit (EVENT_RX_MEMORY, &dev->flags)) {
+ 		struct urb	*urb = NULL;
+ 		int resched = 1;
+@@ -1522,7 +1523,7 @@ static inline void usb_free_skb(struct sk_buff *skb)
+ 
+ /*-------------------------------------------------------------------------*/
+ 
+-// tasklet (work deferred from completions, in_irq) or timer
++// work (work deferred from completions, in_irq) or timer
+ 
+ static void usbnet_bh (struct timer_list *t)
+ {
+@@ -1582,9 +1583,9 @@ static void usbnet_bh (struct timer_list *t)
+ 	}
+ }
+ 
+-static void usbnet_bh_tasklet(struct tasklet_struct *t)
++static void usbnet_bh_work(struct work_struct *t)
+ {
+-	struct usbnet *dev = from_tasklet(dev, t, bh);
++	struct usbnet *dev = from_work(dev, t, bh);
+ 
+ 	usbnet_bh(&dev->delay);
+ }
+@@ -1721,7 +1722,7 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
+ 	skb_queue_head_init (&dev->txq);
+ 	skb_queue_head_init (&dev->done);
+ 	skb_queue_head_init(&dev->rxq_pause);
+-	tasklet_setup(&dev->bh, usbnet_bh_tasklet);
++	INIT_WORK(&dev->bh, usbnet_bh_work);
+ 	INIT_WORK (&dev->kevent, usbnet_deferred_kevent);
+ 	init_usb_anchor(&dev->deferred);
+ 	timer_setup(&dev->delay, usbnet_bh, 0);
+diff --git a/drivers/net/wan/farsync.c b/drivers/net/wan/farsync.c
+index 5b01642ca44e..12364fef8e17 100644
+--- a/drivers/net/wan/farsync.c
++++ b/drivers/net/wan/farsync.c
+@@ -26,6 +26,7 @@
+ #include <linux/hdlc.h>
+ #include <asm/io.h>
+ #include <linux/uaccess.h>
++#include <linux/workqueue.h>
+ 
+ #include "farsync.h"
+ 
+@@ -553,16 +554,16 @@ MODULE_DEVICE_TABLE(pci, fst_pci_dev_id);
+  *
+  *      So that we don't spend too much time processing events in the
+  *      Interrupt Service routine, we will declare a work queue per Card
+- *      and make the ISR schedule a task in the queue for later execution.
++ *      and make the ISR schedule a work in the queue for later execution.
+  *      In the 2.4 Kernel we used to use the immediate queue for BH's
+- *      Now that they are gone, tasklets seem to be much better than work
++ *      Now that they are gone, works seem to be much better than work
+  *      queues.
+  */
+ 
+ static void do_bottom_half_tx(struct fst_card_info *card);
+ static void do_bottom_half_rx(struct fst_card_info *card);
+-static void fst_process_tx_work_q(struct tasklet_struct *unused);
+-static void fst_process_int_work_q(struct tasklet_struct *unused);
++static void fst_process_tx_work_q(struct work_struct *unused);
++static void fst_process_int_work_q(struct work_struct *unused);
+ 
+ static DECLARE_TASKLET(fst_tx_task, fst_process_tx_work_q);
+ static DECLARE_TASKLET(fst_int_task, fst_process_int_work_q);
+@@ -1394,7 +1395,7 @@ do_bottom_half_rx(struct fst_card_info *card)
+ 				 * Schedule another event
+ 				 */
+ 				fst_q_work_item(&fst_work_intq, card->card_no);
+-				tasklet_schedule(&fst_int_task);
++				queue_work(system_bh_wq, &fst_int_task);
+ 				break;	/* Leave the loop */
+ 			}
+ 			fst_intr_rx(card, port);
+@@ -1487,7 +1488,7 @@ fst_intr(int dummy, void *dev_id)
+ 
+ 	/* Scehdule the bottom half of the ISR */
+ 	fst_q_work_item(&fst_work_intq, card->card_no);
+-	tasklet_schedule(&fst_int_task);
++	queue_work(system_bh_wq, &fst_int_task);
+ 
+ 	/* Drain the event queue */
+ 	rdidx = FST_RDB(card, interruptEvent.rdindex) & 0x1f;
+@@ -2267,7 +2268,7 @@ fst_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ 
+ 	/* Scehdule the bottom half which now does transmit processing */
+ 	fst_q_work_item(&fst_work_txq, card->card_no);
+-	tasklet_schedule(&fst_tx_task);
++	queue_work(system_bh_wq, &fst_tx_task);
+ 
+ 	return NETDEV_TX_OK;
+ }
+diff --git a/drivers/net/wan/hdlc_x25.c b/drivers/net/wan/hdlc_x25.c
+index f72c92c24003..52723e7147df 100644
+--- a/drivers/net/wan/hdlc_x25.c
++++ b/drivers/net/wan/hdlc_x25.c
+@@ -19,6 +19,7 @@
+ #include <linux/poll.h>
+ #include <linux/rtnetlink.h>
+ #include <linux/skbuff.h>
++#include <linux/workqueue.h>
+ #include <net/x25device.h>
+ 
+ struct x25_state {
+@@ -26,7 +27,7 @@ struct x25_state {
+ 	bool up;
+ 	spinlock_t up_lock; /* Protects "up" */
+ 	struct sk_buff_head rx_queue;
+-	struct tasklet_struct rx_tasklet;
++	struct work_struct rx_work;
+ };
+ 
+ static int x25_ioctl(struct net_device *dev, struct if_settings *ifs);
+@@ -36,9 +37,9 @@ static struct x25_state *state(hdlc_device *hdlc)
+ 	return hdlc->state;
+ }
+ 
+-static void x25_rx_queue_kick(struct tasklet_struct *t)
++static void x25_rx_queue_kick(struct work_struct *t)
+ {
+-	struct x25_state *x25st = from_tasklet(x25st, t, rx_tasklet);
++	struct x25_state *x25st = from_work(x25st, t, rx_work);
+ 	struct sk_buff *skb = skb_dequeue(&x25st->rx_queue);
+ 
+ 	while (skb) {
+@@ -65,7 +66,7 @@ static void x25_connect_disconnect(struct net_device *dev, int reason, int code)
+ 	skb->protocol = x25_type_trans(skb, dev);
+ 
+ 	skb_queue_tail(&x25st->rx_queue, skb);
+-	tasklet_schedule(&x25st->rx_tasklet);
++	queue_work(system_bh_wq, &x25st->rx_work);
+ }
+ 
+ static void x25_connected(struct net_device *dev, int reason)
+@@ -96,7 +97,7 @@ static int x25_data_indication(struct net_device *dev, struct sk_buff *skb)
+ 	skb->protocol = x25_type_trans(skb, dev);
+ 
+ 	skb_queue_tail(&x25st->rx_queue, skb);
+-	tasklet_schedule(&x25st->rx_tasklet);
++	queue_work(system_bh_wq, &x25st->rx_work);
+ 	return NET_RX_SUCCESS;
+ }
+ 
+@@ -231,7 +232,7 @@ static void x25_close(struct net_device *dev)
+ 	spin_unlock_bh(&x25st->up_lock);
+ 
+ 	lapb_unregister(dev);
+-	tasklet_kill(&x25st->rx_tasklet);
++	cancel_work_sync(&x25st->rx_work);
+ }
+ 
+ static int x25_rx(struct sk_buff *skb)
+@@ -346,7 +347,7 @@ static int x25_ioctl(struct net_device *dev, struct if_settings *ifs)
+ 		state(hdlc)->up = false;
+ 		spin_lock_init(&state(hdlc)->up_lock);
+ 		skb_queue_head_init(&state(hdlc)->rx_queue);
+-		tasklet_setup(&state(hdlc)->rx_tasklet, x25_rx_queue_kick);
++		INIT_WORK(&state(hdlc)->rx_work, x25_rx_queue_kick);
+ 
+ 		/* There's no header_ops so hard_header_len should be 0. */
+ 		dev->hard_header_len = 0;
+diff --git a/drivers/net/wireless/ath/ath5k/base.c b/drivers/net/wireless/ath/ath5k/base.c
+index 1586f9b4032f..71171e11781d 100644
+--- a/drivers/net/wireless/ath/ath5k/base.c
++++ b/drivers/net/wireless/ath/ath5k/base.c
+@@ -56,6 +56,7 @@
+ #include <linux/etherdevice.h>
+ #include <linux/nl80211.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ 
+ #include <net/cfg80211.h>
+ #include <net/ieee80211_radiotap.h>
+diff --git a/drivers/net/wireless/ath/ath9k/beacon.c b/drivers/net/wireless/ath/ath9k/beacon.c
+index 2c096ee07a76..76731484e88f 100644
+--- a/drivers/net/wireless/ath/ath9k/beacon.c
++++ b/drivers/net/wireless/ath/ath9k/beacon.c
+@@ -16,6 +16,7 @@
+ 
+ #include <linux/dma-mapping.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ #include "ath9k.h"
+ 
+ #define FUDGE 2
+diff --git a/drivers/net/wireless/ath/ath9k/main.c b/drivers/net/wireless/ath/ath9k/main.c
+index 71b000c4cea7..35ec9fd16b0c 100644
+--- a/drivers/net/wireless/ath/ath9k/main.c
++++ b/drivers/net/wireless/ath/ath9k/main.c
+@@ -17,6 +17,7 @@
+ #include <linux/nl80211.h>
+ #include <linux/delay.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ #include "ath9k.h"
+ #include "btcoex.h"
+ 
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.c b/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.c
+index 8cbebea181b1..608da81db357 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.c
+@@ -25,6 +25,7 @@
+ #include <linux/module.h>
+ #include <linux/bcma/bcma.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ #include <net/mac80211.h>
+ #include <defs.h>
+ #include "phy/phy_int.h"
+diff --git a/drivers/net/wireless/intel/iwlegacy/3945-mac.c b/drivers/net/wireless/intel/iwlegacy/3945-mac.c
+index 796405c9cf4d..4f9af8beb066 100644
+--- a/drivers/net/wireless/intel/iwlegacy/3945-mac.c
++++ b/drivers/net/wireless/intel/iwlegacy/3945-mac.c
+@@ -28,6 +28,7 @@
+ #include <linux/etherdevice.h>
+ #include <linux/if_arp.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ 
+ #include <net/ieee80211_radiotap.h>
+ #include <net/mac80211.h>
+diff --git a/drivers/net/wireless/intel/iwlegacy/4965-mac.c b/drivers/net/wireless/intel/iwlegacy/4965-mac.c
+index ba74d3d6fa28..55b920dd66ee 100644
+--- a/drivers/net/wireless/intel/iwlegacy/4965-mac.c
++++ b/drivers/net/wireless/intel/iwlegacy/4965-mac.c
+@@ -29,6 +29,7 @@
+ #include <linux/if_arp.h>
+ #include <linux/units.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ 
+ #include <net/mac80211.h>
+ 
+diff --git a/drivers/net/wireless/ralink/rt2x00/rt2800mmio.c b/drivers/net/wireless/ralink/rt2x00/rt2800mmio.c
+index 5da81d006c45..6273452dc55e 100644
+--- a/drivers/net/wireless/ralink/rt2x00/rt2800mmio.c
++++ b/drivers/net/wireless/ralink/rt2x00/rt2800mmio.c
+@@ -18,6 +18,7 @@
+ #include <linux/module.h>
+ #include <linux/export.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ 
+ #include "rt2x00.h"
+ #include "rt2x00mmio.h"
+-- 
+2.17.1
+

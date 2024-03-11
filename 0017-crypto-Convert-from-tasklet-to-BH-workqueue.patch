@@ -1,0 +1,1820 @@
+From ec4b593f7b8f770036848b63bb67a37158fe0e16 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:17:42 +0000
+Subject: [PATCH 17/18] crypto: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/crypto/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/crypto/amcc/crypto4xx_core.c          |  4 +-
+ drivers/crypto/amcc/crypto4xx_core.h          |  3 +-
+ drivers/crypto/aspeed/aspeed-acry.c           |  7 ++--
+ drivers/crypto/aspeed/aspeed-hace.c           |  4 +-
+ drivers/crypto/aspeed/aspeed-hace.h           |  5 ++-
+ drivers/crypto/atmel-aes.c                    | 29 +++++++-------
+ drivers/crypto/atmel-sha.c                    | 29 +++++++-------
+ drivers/crypto/atmel-tdes.c                   | 33 ++++++++--------
+ drivers/crypto/axis/artpec6_crypto.c          | 15 +++----
+ drivers/crypto/caam/intern.h                  |  2 +-
+ drivers/crypto/caam/jr.c                      | 10 ++---
+ drivers/crypto/cavium/cpt/cptvf_main.c        |  7 ++--
+ drivers/crypto/cavium/nitrox/nitrox_dev.h     |  3 +-
+ drivers/crypto/cavium/nitrox/nitrox_isr.c     |  8 ++--
+ drivers/crypto/ccp/ccp-dev.c                  | 15 +++----
+ drivers/crypto/ccp/ccp-dev.h                  |  7 ++--
+ drivers/crypto/ccp/ccp-dmaengine.c            |  2 +-
+ drivers/crypto/ccree/cc_fips.c                | 15 +++----
+ drivers/crypto/ccree/cc_request_mgr.c         | 15 +++----
+ drivers/crypto/hifn_795x.c                    | 15 +++----
+ drivers/crypto/img-hash.c                     | 19 ++++-----
+ drivers/crypto/intel/ixp4xx/ixp4xx_crypto.c   | 11 +++---
+ .../intel/qat/qat_common/adf_accel_devices.h  |  3 +-
+ drivers/crypto/intel/qat/qat_common/adf_isr.c |  4 +-
+ .../qat/qat_common/adf_transport_internal.h   |  3 +-
+ .../crypto/intel/qat/qat_common/adf_vf_isr.c  |  8 ++--
+ drivers/crypto/marvell/octeontx/otx_cptvf.h   |  3 +-
+ .../crypto/marvell/octeontx/otx_cptvf_main.c  |  2 +-
+ drivers/crypto/marvell/octeontx2/otx2_cptlf.h |  5 ++-
+ .../marvell/octeontx2/otx2_cptvf_main.c       |  4 +-
+ drivers/crypto/omap-aes.c                     |  4 +-
+ drivers/crypto/omap-aes.h                     |  2 +-
+ drivers/crypto/omap-des.c                     | 11 +++---
+ drivers/crypto/omap-sham.c                    |  9 +++--
+ drivers/crypto/qce/core.c                     |  2 +-
+ drivers/crypto/qce/core.h                     |  4 +-
+ drivers/crypto/s5p-sss.c                      | 39 ++++++++++---------
+ drivers/crypto/starfive/jh7110-cryp.c         |  8 ++--
+ drivers/crypto/starfive/jh7110-cryp.h         |  5 ++-
+ drivers/crypto/talitos.c                      |  4 +-
+ drivers/crypto/talitos.h                      |  4 +-
+ drivers/crypto/virtio/virtio_crypto_common.h  |  3 +-
+ drivers/crypto/virtio/virtio_crypto_core.c    |  2 +-
+ 43 files changed, 206 insertions(+), 181 deletions(-)
+
+diff --git a/drivers/crypto/amcc/crypto4xx_core.c b/drivers/crypto/amcc/crypto4xx_core.c
+index 6006703fb6d7..978d7aaad20b 100644
+--- a/drivers/crypto/amcc/crypto4xx_core.c
++++ b/drivers/crypto/amcc/crypto4xx_core.c
+@@ -1455,7 +1455,7 @@ static int crypto4xx_probe(struct platform_device *ofdev)
+ 	irq_dispose_mapping(core_dev->irq);
+ 	iounmap(core_dev->dev->ce_base);
+ err_iomap:
+-	tasklet_kill(&core_dev->tasklet);
++	cancel_work_sync(&core_dev->tasklet);
+ err_build_sdr:
+ 	crypto4xx_destroy_sdr(core_dev->dev);
+ 	crypto4xx_destroy_gdr(core_dev->dev);
+@@ -1477,7 +1477,7 @@ static void crypto4xx_remove(struct platform_device *ofdev)
+ 	free_irq(core_dev->irq, dev);
+ 	irq_dispose_mapping(core_dev->irq);
+ 
+-	tasklet_kill(&core_dev->tasklet);
++	cancel_work_sync(&core_dev->tasklet);
+ 	/* Un-register with Linux CryptoAPI */
+ 	crypto4xx_unregister_alg(core_dev->dev);
+ 	mutex_destroy(&core_dev->rng_lock);
+diff --git a/drivers/crypto/amcc/crypto4xx_core.h b/drivers/crypto/amcc/crypto4xx_core.h
+index 96355d463b04..5055a2d25274 100644
+--- a/drivers/crypto/amcc/crypto4xx_core.h
++++ b/drivers/crypto/amcc/crypto4xx_core.h
+@@ -16,6 +16,7 @@
+ #include <linux/ratelimit.h>
+ #include <linux/mutex.h>
+ #include <linux/scatterlist.h>
++#include <linux/workqueue.h>
+ #include <crypto/internal/hash.h>
+ #include <crypto/internal/aead.h>
+ #include <crypto/internal/rng.h>
+@@ -110,7 +111,7 @@ struct crypto4xx_core_device {
+ 	struct hwrng *trng;
+ 	u32 int_status;
+ 	u32 irq;
+-	struct tasklet_struct tasklet;
++	struct work_struct work;
+ 	spinlock_t lock;
+ 	struct mutex rng_lock;
+ };
+diff --git a/drivers/crypto/aspeed/aspeed-acry.c b/drivers/crypto/aspeed/aspeed-acry.c
+index b4613bd4ad96..61abf8e76828 100644
+--- a/drivers/crypto/aspeed/aspeed-acry.c
++++ b/drivers/crypto/aspeed/aspeed-acry.c
+@@ -19,6 +19,7 @@
+ #include <linux/regmap.h>
+ #include <linux/slab.h>
+ #include <linux/string.h>
++#include <linux/workqueue.h>
+ 
+ #ifdef CONFIG_CRYPTO_DEV_ASPEED_DEBUG
+ #define ACRY_DBG(d, fmt, ...)	\
+@@ -90,7 +91,7 @@ struct aspeed_acry_dev {
+ 	struct regmap			*ahbc;
+ 
+ 	struct akcipher_request		*req;
+-	struct tasklet_struct		done_task;
++	struct work_struct 		done_task;
+ 	aspeed_acry_fn_t		resume;
+ 	unsigned long			flags;
+ 
+@@ -664,7 +665,7 @@ static irqreturn_t aspeed_acry_irq(int irq, void *dev)
+ 		ast_acry_write(acry_dev, 0, ASPEED_ACRY_TRIGGER);
+ 
+ 		if (acry_dev->flags & CRYPTO_FLAGS_BUSY)
+-			tasklet_schedule(&acry_dev->done_task);
++			queue_work(system_bh_wq, &acry_dev->done_task);
+ 		else
+ 			dev_err(acry_dev->dev, "RSA no active requests.\n");
+ 	}
+@@ -800,7 +801,7 @@ static void aspeed_acry_remove(struct platform_device *pdev)
+ 
+ 	aspeed_acry_unregister(acry_dev);
+ 	crypto_engine_exit(acry_dev->crypt_engine_rsa);
+-	tasklet_kill(&acry_dev->done_task);
++	cancel_work_sync(&acry_dev->done_task);
+ 	clk_disable_unprepare(acry_dev->clk);
+ }
+ 
+diff --git a/drivers/crypto/aspeed/aspeed-hace.c b/drivers/crypto/aspeed/aspeed-hace.c
+index 062f2a66dd23..390188efadea 100644
+--- a/drivers/crypto/aspeed/aspeed-hace.c
++++ b/drivers/crypto/aspeed/aspeed-hace.c
+@@ -256,8 +256,8 @@ static void aspeed_hace_remove(struct platform_device *pdev)
+ 	crypto_engine_exit(hace_dev->crypt_engine_hash);
+ 	crypto_engine_exit(hace_dev->crypt_engine_crypto);
+ 
+-	tasklet_kill(&hash_engine->done_task);
+-	tasklet_kill(&crypto_engine->done_task);
++	cancel_work_sync(&hash_engine->done_task);
++	cancel_work_sync(&crypto_engine->done_task);
+ 
+ 	clk_disable_unprepare(hace_dev->clk);
+ }
+diff --git a/drivers/crypto/aspeed/aspeed-hace.h b/drivers/crypto/aspeed/aspeed-hace.h
+index 68f70e01fccb..2d2a4fac13ce 100644
+--- a/drivers/crypto/aspeed/aspeed-hace.h
++++ b/drivers/crypto/aspeed/aspeed-hace.h
+@@ -10,6 +10,7 @@
+ #include <linux/compiler_attributes.h>
+ #include <linux/interrupt.h>
+ #include <linux/types.h>
++#include <linux/workqueue.h>
+ 
+ /*****************************
+  *                           *
+@@ -143,7 +144,7 @@ struct aspeed_sg_list {
+ };
+ 
+ struct aspeed_engine_hash {
+-	struct tasklet_struct		done_task;
++	struct work_struct 		done_task;
+ 	unsigned long			flags;
+ 	struct ahash_request		*req;
+ 
+@@ -202,7 +203,7 @@ struct aspeed_sham_reqctx {
+ };
+ 
+ struct aspeed_engine_crypto {
+-	struct tasklet_struct		done_task;
++	struct work_struct 		done_task;
+ 	unsigned long			flags;
+ 	struct skcipher_request		*req;
+ 
+diff --git a/drivers/crypto/atmel-aes.c b/drivers/crypto/atmel-aes.c
+index 8bd64fc37e75..bc9efbc07622 100644
+--- a/drivers/crypto/atmel-aes.c
++++ b/drivers/crypto/atmel-aes.c
+@@ -31,6 +31,7 @@
+ #include <linux/mod_devicetable.h>
+ #include <linux/delay.h>
+ #include <linux/crypto.h>
++#include <linux/workqueue.h>
+ #include <crypto/scatterwalk.h>
+ #include <crypto/algapi.h>
+ #include <crypto/aes.h>
+@@ -190,8 +191,8 @@ struct atmel_aes_dev {
+ 	spinlock_t		lock;
+ 	struct crypto_queue	queue;
+ 
+-	struct tasklet_struct	done_task;
+-	struct tasklet_struct	queue_task;
++	struct work_struct 	done_task;
++	struct work_struct 	queue_task;
+ 
+ 	size_t			total;
+ 	size_t			datalen;
+@@ -538,7 +539,7 @@ static inline int atmel_aes_complete(struct atmel_aes_dev *dd, int err)
+ 	if (dd->is_async)
+ 		crypto_request_complete(dd->areq, err);
+ 
+-	tasklet_schedule(&dd->queue_task);
++	queue_work(system_bh_wq, &dd->queue_task);
+ 
+ 	return err;
+ }
+@@ -2189,7 +2190,7 @@ static irqreturn_t atmel_aes_irq(int irq, void *dev_id)
+ 	if (reg & atmel_aes_read(aes_dd, AES_IMR)) {
+ 		atmel_aes_write(aes_dd, AES_IDR, reg);
+ 		if (AES_FLAGS_BUSY & aes_dd->flags)
+-			tasklet_schedule(&aes_dd->done_task);
++			queue_work(system_bh_wq, &aes_dd->done_task);
+ 		else
+ 			dev_warn(aes_dd->dev, "AES interrupt when no active requests.\n");
+ 		return IRQ_HANDLED;
+@@ -2357,7 +2358,7 @@ static int atmel_aes_probe(struct platform_device *pdev)
+ 	aes_dd->io_base = devm_platform_get_and_ioremap_resource(pdev, 0, &aes_res);
+ 	if (IS_ERR(aes_dd->io_base)) {
+ 		err = PTR_ERR(aes_dd->io_base);
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 	aes_dd->phys_base = aes_res->start;
+ 
+@@ -2365,14 +2366,14 @@ static int atmel_aes_probe(struct platform_device *pdev)
+ 	aes_dd->irq = platform_get_irq(pdev,  0);
+ 	if (aes_dd->irq < 0) {
+ 		err = aes_dd->irq;
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 
+ 	err = devm_request_irq(&pdev->dev, aes_dd->irq, atmel_aes_irq,
+ 			       IRQF_SHARED, "atmel-aes", aes_dd);
+ 	if (err) {
+ 		dev_err(dev, "unable to request aes irq.\n");
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 
+ 	/* Initializing the clock */
+@@ -2380,12 +2381,12 @@ static int atmel_aes_probe(struct platform_device *pdev)
+ 	if (IS_ERR(aes_dd->iclk)) {
+ 		dev_err(dev, "clock initialization failed.\n");
+ 		err = PTR_ERR(aes_dd->iclk);
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 
+ 	err = clk_prepare(aes_dd->iclk);
+ 	if (err)
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 
+ 	err = atmel_aes_hw_version_init(aes_dd);
+ 	if (err)
+@@ -2431,9 +2432,9 @@ static int atmel_aes_probe(struct platform_device *pdev)
+ 	atmel_aes_buff_cleanup(aes_dd);
+ err_iclk_unprepare:
+ 	clk_unprepare(aes_dd->iclk);
+-err_tasklet_kill:
+-	tasklet_kill(&aes_dd->done_task);
+-	tasklet_kill(&aes_dd->queue_task);
++err_work_kill:
++	cancel_work_sync(&aes_dd->done_task);
++	cancel_work_sync(&aes_dd->queue_task);
+ 
+ 	return err;
+ }
+@@ -2450,8 +2451,8 @@ static void atmel_aes_remove(struct platform_device *pdev)
+ 
+ 	atmel_aes_unregister_algs(aes_dd);
+ 
+-	tasklet_kill(&aes_dd->done_task);
+-	tasklet_kill(&aes_dd->queue_task);
++	cancel_work_sync(&aes_dd->done_task);
++	cancel_work_sync(&aes_dd->queue_task);
+ 
+ 	atmel_aes_dma_cleanup(aes_dd);
+ 	atmel_aes_buff_cleanup(aes_dd);
+diff --git a/drivers/crypto/atmel-sha.c b/drivers/crypto/atmel-sha.c
+index f4cd6158a4f7..8070b9634969 100644
+--- a/drivers/crypto/atmel-sha.c
++++ b/drivers/crypto/atmel-sha.c
+@@ -31,6 +31,7 @@
+ #include <linux/mod_devicetable.h>
+ #include <linux/delay.h>
+ #include <linux/crypto.h>
++#include <linux/workqueue.h>
+ #include <crypto/scatterwalk.h>
+ #include <crypto/algapi.h>
+ #include <crypto/sha1.h>
+@@ -136,8 +137,8 @@ struct atmel_sha_dev {
+ 	void __iomem		*io_base;
+ 
+ 	spinlock_t		lock;
+-	struct tasklet_struct	done_task;
+-	struct tasklet_struct	queue_task;
++	struct work_struct 	done_task;
++	struct work_struct 	queue_task;
+ 
+ 	unsigned long		flags;
+ 	struct crypto_queue	queue;
+@@ -295,7 +296,7 @@ static inline int atmel_sha_complete(struct atmel_sha_dev *dd, int err)
+ 		ahash_request_complete(req, err);
+ 
+ 	/* handle new request */
+-	tasklet_schedule(&dd->queue_task);
++	queue_work(system_bh_wq, &dd->queue_task);
+ 
+ 	return err;
+ }
+@@ -1371,7 +1372,7 @@ static irqreturn_t atmel_sha_irq(int irq, void *dev_id)
+ 			sha_dd->flags |= SHA_FLAGS_OUTPUT_READY;
+ 			if (!(SHA_FLAGS_CPU & sha_dd->flags))
+ 				sha_dd->flags |= SHA_FLAGS_DMA_READY;
+-			tasklet_schedule(&sha_dd->done_task);
++			queue_work(system_bh_wq, &sha_dd->done_task);
+ 		} else {
+ 			dev_warn(sha_dd->dev, "SHA interrupt when no active requests.\n");
+ 		}
+@@ -2604,7 +2605,7 @@ static int atmel_sha_probe(struct platform_device *pdev)
+ 	sha_dd->io_base = devm_platform_get_and_ioremap_resource(pdev, 0, &sha_res);
+ 	if (IS_ERR(sha_dd->io_base)) {
+ 		err = PTR_ERR(sha_dd->io_base);
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 	sha_dd->phys_base = sha_res->start;
+ 
+@@ -2612,14 +2613,14 @@ static int atmel_sha_probe(struct platform_device *pdev)
+ 	sha_dd->irq = platform_get_irq(pdev,  0);
+ 	if (sha_dd->irq < 0) {
+ 		err = sha_dd->irq;
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 
+ 	err = devm_request_irq(&pdev->dev, sha_dd->irq, atmel_sha_irq,
+ 			       IRQF_SHARED, "atmel-sha", sha_dd);
+ 	if (err) {
+ 		dev_err(dev, "unable to request sha irq.\n");
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 
+ 	/* Initializing the clock */
+@@ -2627,12 +2628,12 @@ static int atmel_sha_probe(struct platform_device *pdev)
+ 	if (IS_ERR(sha_dd->iclk)) {
+ 		dev_err(dev, "clock initialization failed.\n");
+ 		err = PTR_ERR(sha_dd->iclk);
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 
+ 	err = clk_prepare(sha_dd->iclk);
+ 	if (err)
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 
+ 	err = atmel_sha_hw_version_init(sha_dd);
+ 	if (err)
+@@ -2671,9 +2672,9 @@ static int atmel_sha_probe(struct platform_device *pdev)
+ 		atmel_sha_dma_cleanup(sha_dd);
+ err_iclk_unprepare:
+ 	clk_unprepare(sha_dd->iclk);
+-err_tasklet_kill:
+-	tasklet_kill(&sha_dd->queue_task);
+-	tasklet_kill(&sha_dd->done_task);
++err_work_kill:
++	cancel_work_sync(&sha_dd->queue_task);
++	cancel_work_sync(&sha_dd->done_task);
+ 
+ 	return err;
+ }
+@@ -2688,8 +2689,8 @@ static void atmel_sha_remove(struct platform_device *pdev)
+ 
+ 	atmel_sha_unregister_algs(sha_dd);
+ 
+-	tasklet_kill(&sha_dd->queue_task);
+-	tasklet_kill(&sha_dd->done_task);
++	cancel_work_sync(&sha_dd->queue_task);
++	cancel_work_sync(&sha_dd->done_task);
+ 
+ 	if (sha_dd->caps.has_dma)
+ 		atmel_sha_dma_cleanup(sha_dd);
+diff --git a/drivers/crypto/atmel-tdes.c b/drivers/crypto/atmel-tdes.c
+index dcc2380a5889..ac288f0e3fd5 100644
+--- a/drivers/crypto/atmel-tdes.c
++++ b/drivers/crypto/atmel-tdes.c
+@@ -31,6 +31,7 @@
+ #include <linux/mod_devicetable.h>
+ #include <linux/delay.h>
+ #include <linux/crypto.h>
++#include <linux/workqueue.h>
+ #include <crypto/scatterwalk.h>
+ #include <crypto/algapi.h>
+ #include <crypto/internal/des.h>
+@@ -96,8 +97,8 @@ struct atmel_tdes_dev {
+ 	spinlock_t		lock;
+ 	struct crypto_queue	queue;
+ 
+-	struct tasklet_struct	done_task;
+-	struct tasklet_struct	queue_task;
++	struct work_struct 	done_task;
++	struct work_struct 	queue_task;
+ 
+ 	struct skcipher_request	*req;
+ 	size_t				total;
+@@ -242,7 +243,7 @@ static void atmel_tdes_dma_callback(void *data)
+ 	struct atmel_tdes_dev *dd = data;
+ 
+ 	/* dma_lch_out - completed */
+-	tasklet_schedule(&dd->done_task);
++	queue_work(system_bh_wq, &dd->done_task);
+ }
+ 
+ static int atmel_tdes_write_ctrl(struct atmel_tdes_dev *dd)
+@@ -602,7 +603,7 @@ static int atmel_tdes_handle_queue(struct atmel_tdes_dev *dd,
+ 	if (err) {
+ 		/* des_task will not finish it, so do it here */
+ 		atmel_tdes_finish_req(dd, err);
+-		tasklet_schedule(&dd->queue_task);
++		queue_work(system_bh_wq, &dd->queue_task);
+ 	}
+ 
+ 	return ret;
+@@ -888,7 +889,7 @@ static irqreturn_t atmel_tdes_irq(int irq, void *dev_id)
+ 	if (reg & atmel_tdes_read(tdes_dd, TDES_IMR)) {
+ 		atmel_tdes_write(tdes_dd, TDES_IDR, reg);
+ 		if (TDES_FLAGS_BUSY & tdes_dd->flags)
+-			tasklet_schedule(&tdes_dd->done_task);
++			queue_work(system_bh_wq, &tdes_dd->done_task);
+ 		else
+ 			dev_warn(tdes_dd->dev, "TDES interrupt when no active requests.\n");
+ 		return IRQ_HANDLED;
+@@ -980,7 +981,7 @@ static int atmel_tdes_probe(struct platform_device *pdev)
+ 	tdes_dd->io_base = devm_platform_get_and_ioremap_resource(pdev, 0, &tdes_res);
+ 	if (IS_ERR(tdes_dd->io_base)) {
+ 		err = PTR_ERR(tdes_dd->io_base);
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 	tdes_dd->phys_base = tdes_res->start;
+ 
+@@ -988,14 +989,14 @@ static int atmel_tdes_probe(struct platform_device *pdev)
+ 	tdes_dd->irq = platform_get_irq(pdev,  0);
+ 	if (tdes_dd->irq < 0) {
+ 		err = tdes_dd->irq;
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 
+ 	err = devm_request_irq(&pdev->dev, tdes_dd->irq, atmel_tdes_irq,
+ 			       IRQF_SHARED, "atmel-tdes", tdes_dd);
+ 	if (err) {
+ 		dev_err(dev, "unable to request tdes irq.\n");
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 
+ 	/* Initializing the clock */
+@@ -1003,18 +1004,18 @@ static int atmel_tdes_probe(struct platform_device *pdev)
+ 	if (IS_ERR(tdes_dd->iclk)) {
+ 		dev_err(dev, "clock initialization failed.\n");
+ 		err = PTR_ERR(tdes_dd->iclk);
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 	}
+ 
+ 	err = atmel_tdes_hw_version_init(tdes_dd);
+ 	if (err)
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 
+ 	atmel_tdes_get_cap(tdes_dd);
+ 
+ 	err = atmel_tdes_buff_init(tdes_dd);
+ 	if (err)
+-		goto err_tasklet_kill;
++		goto err_work_kill;
+ 
+ 	if (tdes_dd->caps.has_dma) {
+ 		err = atmel_tdes_dma_init(tdes_dd);
+@@ -1046,9 +1047,9 @@ static int atmel_tdes_probe(struct platform_device *pdev)
+ 		atmel_tdes_dma_cleanup(tdes_dd);
+ err_buff_cleanup:
+ 	atmel_tdes_buff_cleanup(tdes_dd);
+-err_tasklet_kill:
+-	tasklet_kill(&tdes_dd->done_task);
+-	tasklet_kill(&tdes_dd->queue_task);
++err_work_kill:
++	cancel_work_sync(&tdes_dd->done_task);
++	cancel_work_sync(&tdes_dd->queue_task);
+ 
+ 	return err;
+ }
+@@ -1063,8 +1064,8 @@ static void atmel_tdes_remove(struct platform_device *pdev)
+ 
+ 	atmel_tdes_unregister_algs(tdes_dd);
+ 
+-	tasklet_kill(&tdes_dd->done_task);
+-	tasklet_kill(&tdes_dd->queue_task);
++	cancel_work_sync(&tdes_dd->done_task);
++	cancel_work_sync(&tdes_dd->queue_task);
+ 
+ 	if (tdes_dd->caps.has_dma)
+ 		atmel_tdes_dma_cleanup(tdes_dd);
+diff --git a/drivers/crypto/axis/artpec6_crypto.c b/drivers/crypto/axis/artpec6_crypto.c
+index dbc1d483f2af..cd4bbce9fb02 100644
+--- a/drivers/crypto/axis/artpec6_crypto.c
++++ b/drivers/crypto/axis/artpec6_crypto.c
+@@ -21,6 +21,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/scatterlist.h>
+ #include <linux/slab.h>
++#include <linux/workqueue.h>
+ 
+ #include <crypto/aes.h>
+ #include <crypto/gcm.h>
+@@ -261,7 +262,7 @@ struct artpec6_crypto {
+ 	spinlock_t queue_lock;
+ 	struct list_head queue; /* waiting for pdma fifo space */
+ 	struct list_head pending; /* submitted to pdma fifo */
+-	struct tasklet_struct task;
++	struct work_struct work;
+ 	struct kmem_cache *dma_cache;
+ 	int pending_count;
+ 	struct timer_list timer;
+@@ -2076,7 +2077,7 @@ static void artpec6_crypto_timeout(struct timer_list *t)
+ 
+ 	dev_info_ratelimited(artpec6_crypto_dev, "timeout\n");
+ 
+-	tasklet_schedule(&ac->task);
++	queue_work(system_bh_wq, &ac->work);
+ }
+ 
+ static void artpec6_crypto_task(unsigned long data)
+@@ -2598,7 +2599,7 @@ static irqreturn_t artpec6_crypto_irq(int irq, void *dev_id)
+ 	 * The in_data means all data was sent to memory and then
+ 	 * we request a status flush command to write the per-job
+ 	 * status to its status vector. This ensures that the
+-	 * tasklet can detect exactly how many submitted jobs
++	 * work can detect exactly how many submitted jobs
+ 	 * that have finished.
+ 	 */
+ 	if (intr & mask_in_data)
+@@ -2612,7 +2613,7 @@ static irqreturn_t artpec6_crypto_irq(int irq, void *dev_id)
+ 	writel_relaxed(ack, base + ack_intr_reg);
+ 
+ 	if (intr & mask_in_eop_flush)
+-		tasklet_schedule(&ac->task);
++		queue_work(system_bh_wq, &ac->work);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -2901,7 +2902,7 @@ static int artpec6_crypto_probe(struct platform_device *pdev)
+ 	artpec6_crypto_init_debugfs();
+ #endif
+ 
+-	tasklet_init(&ac->task, artpec6_crypto_task,
++	tasklet_init(&ac->work, artpec6_crypto_task,
+ 		     (unsigned long)ac);
+ 
+ 	ac->pad_buffer = devm_kzalloc(&pdev->dev, 2 * ARTPEC_CACHE_LINE_MAX,
+@@ -2967,9 +2968,9 @@ static void artpec6_crypto_remove(struct platform_device *pdev)
+ 	crypto_unregister_skciphers(crypto_algos, ARRAY_SIZE(crypto_algos));
+ 	crypto_unregister_aeads(aead_algos, ARRAY_SIZE(aead_algos));
+ 
+-	tasklet_disable(&ac->task);
++	disable_work_sync(&ac->work);
+ 	devm_free_irq(&pdev->dev, irq, ac);
+-	tasklet_kill(&ac->task);
++	cancel_work_sync(&ac->work);
+ 	del_timer_sync(&ac->timer);
+ 
+ 	artpec6_crypto_disable_hw(ac);
+diff --git a/drivers/crypto/caam/intern.h b/drivers/crypto/caam/intern.h
+index e51320150872..0ea2b1c4cee6 100644
+--- a/drivers/crypto/caam/intern.h
++++ b/drivers/crypto/caam/intern.h
+@@ -63,7 +63,7 @@ struct caam_drv_private_jr {
+ 	struct device		*dev;
+ 	int ridx;
+ 	struct caam_job_ring __iomem *rregs;	/* JobR's register space */
+-	struct tasklet_struct irqtask;
++	struct work_struct irqtask;
+ 	struct caam_jr_dequeue_params tasklet_params;
+ 	int irq;			/* One per queue */
+ 	bool hwrng;
+diff --git a/drivers/crypto/caam/jr.c b/drivers/crypto/caam/jr.c
+index 26eba7de3fb0..cca6083432e4 100644
+--- a/drivers/crypto/caam/jr.c
++++ b/drivers/crypto/caam/jr.c
+@@ -175,7 +175,7 @@ static int caam_jr_shutdown(struct device *dev)
+ 
+ 	ret = caam_reset_hw_jr(dev);
+ 
+-	tasklet_kill(&jrp->irqtask);
++	cancel_work_sync(&jrp->irqtask);
+ 
+ 	return ret;
+ }
+@@ -570,7 +570,7 @@ static int caam_jr_init(struct device *dev)
+ 	if (error) {
+ 		dev_err(dev, "can't connect JobR %d interrupt (%d)\n",
+ 			jrp->ridx, jrp->irq);
+-		tasklet_kill(&jrp->irqtask);
++		cancel_work_sync(&jrp->irqtask);
+ 	}
+ 
+ 	return error;
+@@ -710,7 +710,7 @@ static int caam_jr_suspend(struct device *dev)
+ 	if (ctrlpriv->caam_off_during_pm) {
+ 		int err;
+ 
+-		tasklet_disable(&jrpriv->irqtask);
++		disable_work_sync(&jrpriv->irqtask);
+ 
+ 		/* mask itr to call flush */
+ 		clrsetbits_32(&jrpriv->rregs->rconfig_lo, 0, JRCFG_IMSK);
+@@ -760,7 +760,7 @@ static int caam_jr_resume(struct device *dev)
+ 					return err;
+ 				}
+ 
+-				tasklet_enable(&jrpriv->irqtask);
++				enable_and_queue_work(system_bh_wq, &jrpriv->irqtask);
+ 
+ 				clrsetbits_32(&jrpriv->rregs->rconfig_lo,
+ 					      JRCFG_IMSK, 0);
+@@ -783,7 +783,7 @@ static int caam_jr_resume(struct device *dev)
+ 		caam_jr_init_hw(dev, jrpriv->state.inpbusaddr,
+ 				jrpriv->state.outbusaddr);
+ 
+-		tasklet_enable(&jrpriv->irqtask);
++		enable_and_queue_work(system_bh_wq, &jrpriv->irqtask);
+ 	} else if (device_may_wakeup(&pdev->dev)) {
+ 		disable_irq_wake(jrpriv->irq);
+ 	}
+diff --git a/drivers/crypto/cavium/cpt/cptvf_main.c b/drivers/crypto/cavium/cpt/cptvf_main.c
+index c246920e6f54..f0fd92bc6d81 100644
+--- a/drivers/crypto/cavium/cpt/cptvf_main.c
++++ b/drivers/crypto/cavium/cpt/cptvf_main.c
+@@ -5,6 +5,7 @@
+ 
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
++#include <linux/workqueue.h>
+ 
+ #include "cptvf.h"
+ 
+@@ -12,7 +13,7 @@
+ #define DRV_VERSION	"1.0"
+ 
+ struct cptvf_wqe {
+-	struct tasklet_struct twork;
++	struct work_struct twork;
+ 	void *cptvf;
+ 	u32 qno;
+ };
+@@ -72,7 +73,7 @@ static void cleanup_worker_threads(struct cpt_vf *cptvf)
+ 	}
+ 
+ 	for (i = 0; i < cptvf->nr_queues; i++)
+-		tasklet_kill(&cwqe_info->vq_wqe[i].twork);
++		cancel_work_sync(&cwqe_info->vq_wqe[i].twork);
+ 
+ 	kfree_sensitive(cwqe_info);
+ 	cptvf->wqe_info = NULL;
+@@ -602,7 +603,7 @@ static irqreturn_t cptvf_done_intr_handler(int irq, void *cptvf_irq)
+ 				cptvf->vfid);
+ 			return IRQ_NONE;
+ 		}
+-		tasklet_hi_schedule(&wqe->twork);
++		queue_work(system_bh_highpri_wq, &wqe->twork);
+ 	}
+ 
+ 	return IRQ_HANDLED;
+diff --git a/drivers/crypto/cavium/nitrox/nitrox_dev.h b/drivers/crypto/cavium/nitrox/nitrox_dev.h
+index c2d0c23fb81b..5c234e61f0bf 100644
+--- a/drivers/crypto/cavium/nitrox/nitrox_dev.h
++++ b/drivers/crypto/cavium/nitrox/nitrox_dev.h
+@@ -6,6 +6,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/pci.h>
+ #include <linux/if.h>
++#include <linux/workqueue.h>
+ 
+ #define VERSION_LEN 32
+ /* Maximum queues in PF mode */
+@@ -102,7 +103,7 @@ struct nitrox_q_vector {
+ 	char name[IRQ_NAMESZ];
+ 	bool valid;
+ 	int ring;
+-	struct tasklet_struct resp_tasklet;
++	struct work_struct resp_work;
+ 	union {
+ 		struct nitrox_cmdq *cmdq;
+ 		struct nitrox_device *ndev;
+diff --git a/drivers/crypto/cavium/nitrox/nitrox_isr.c b/drivers/crypto/cavium/nitrox/nitrox_isr.c
+index f19e520da6d0..d054378e0ef7 100644
+--- a/drivers/crypto/cavium/nitrox/nitrox_isr.c
++++ b/drivers/crypto/cavium/nitrox/nitrox_isr.c
+@@ -278,8 +278,8 @@ void nitrox_unregister_interrupts(struct nitrox_device *ndev)
+ 		irq_set_affinity_hint(vec, NULL);
+ 		free_irq(vec, qvec);
+ 
+-		tasklet_disable(&qvec->resp_tasklet);
+-		tasklet_kill(&qvec->resp_tasklet);
++		disable_work_sync(&qvec->resp_tasklet);
++		cancel_work_sync(&qvec->resp_tasklet);
+ 		qvec->valid = false;
+ 	}
+ 	kfree(ndev->qvec);
+@@ -396,8 +396,8 @@ void nitrox_sriov_unregister_interrupts(struct nitrox_device *ndev)
+ 		irq_set_affinity_hint(vec, NULL);
+ 		free_irq(vec, qvec);
+ 
+-		tasklet_disable(&qvec->resp_tasklet);
+-		tasklet_kill(&qvec->resp_tasklet);
++		disable_work_sync(&qvec->resp_tasklet);
++		cancel_work_sync(&qvec->resp_tasklet);
+ 		qvec->valid = false;
+ 	}
+ 	kfree(ndev->qvec);
+diff --git a/drivers/crypto/ccp/ccp-dev.c b/drivers/crypto/ccp/ccp-dev.c
+index c531d13d971f..27dbeb05dd7f 100644
+--- a/drivers/crypto/ccp/ccp-dev.c
++++ b/drivers/crypto/ccp/ccp-dev.c
+@@ -25,6 +25,7 @@
+ #include <asm/cpu_device_id.h>
+ #endif
+ #include <linux/ccp.h>
++#include <linux/workqueue.h>
+ 
+ #include "ccp-dev.h"
+ 
+@@ -41,7 +42,7 @@ static unsigned int max_devs = MAX_CCPS;
+ module_param(max_devs, uint, 0444);
+ MODULE_PARM_DESC(max_devs, "Maximum number of CCPs to enable (default: all; 0 disables all CCPs)");
+ 
+-struct ccp_tasklet_data {
++struct ccp_work_data {
+ 	struct completion completion;
+ 	struct ccp_cmd *cmd;
+ };
+@@ -418,7 +419,7 @@ static struct ccp_cmd *ccp_dequeue_cmd(struct ccp_cmd_queue *cmd_q)
+ 
+ static void ccp_do_cmd_complete(unsigned long data)
+ {
+-	struct ccp_tasklet_data *tdata = (struct ccp_tasklet_data *)data;
++	struct ccp_work_data *tdata = (struct ccp_work_data *)data;
+ 	struct ccp_cmd *cmd = tdata->cmd;
+ 
+ 	cmd->callback(cmd->data, cmd->ret);
+@@ -435,10 +436,10 @@ int ccp_cmd_queue_thread(void *data)
+ {
+ 	struct ccp_cmd_queue *cmd_q = (struct ccp_cmd_queue *)data;
+ 	struct ccp_cmd *cmd;
+-	struct ccp_tasklet_data tdata;
+-	struct tasklet_struct tasklet;
++	struct ccp_work_data tdata;
++	struct work_struct work;
+ 
+-	tasklet_init(&tasklet, ccp_do_cmd_complete, (unsigned long)&tdata);
++	tasklet_init(&work, ccp_do_cmd_complete, (unsigned long)&tdata);
+ 
+ 	set_current_state(TASK_INTERRUPTIBLE);
+ 	while (!kthread_should_stop()) {
+@@ -458,7 +459,7 @@ int ccp_cmd_queue_thread(void *data)
+ 		/* Schedule the completion callback */
+ 		tdata.cmd = cmd;
+ 		init_completion(&tdata.completion);
+-		tasklet_schedule(&tasklet);
++		queue_work(system_bh_wq, &work);
+ 		wait_for_completion(&tdata.completion);
+ 	}
+ 
+@@ -628,7 +629,7 @@ int ccp_dev_init(struct sp_device *sp)
+ 		goto e_err;
+ 	}
+ 
+-	ccp->use_tasklet = sp->use_tasklet;
++	ccp->use_work = sp->use_work;
+ 
+ 	ccp->io_regs = sp->io_map + ccp->vdata->offset;
+ 	if (ccp->vdata->setup)
+diff --git a/drivers/crypto/ccp/ccp-dev.h b/drivers/crypto/ccp/ccp-dev.h
+index 83350e2d9821..7c68225966ab 100644
+--- a/drivers/crypto/ccp/ccp-dev.h
++++ b/drivers/crypto/ccp/ccp-dev.h
+@@ -23,6 +23,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/irqreturn.h>
+ #include <linux/dmaengine.h>
++#include <linux/workqueue.h>
+ 
+ #include "sp-dev.h"
+ 
+@@ -251,7 +252,7 @@ struct ccp_dma_chan {
+ 	struct list_head active;
+ 	struct list_head complete;
+ 
+-	struct tasklet_struct cleanup_tasklet;
++	struct work_struct cleanup_work;
+ 
+ 	enum dma_status status;
+ 	struct dma_chan dma_chan;
+@@ -352,8 +353,8 @@ struct ccp_device {
+ 	void *dev_specific;
+ 	unsigned int qim;
+ 	unsigned int irq;
+-	bool use_tasklet;
+-	struct tasklet_struct irq_tasklet;
++	bool use_work;
++	struct work_struct irq_work;
+ 
+ 	/* I/O area used for device communication. The register mapping
+ 	 * starts at an offset into the mapped bar.
+diff --git a/drivers/crypto/ccp/ccp-dmaengine.c b/drivers/crypto/ccp/ccp-dmaengine.c
+index b386a7063818..3674cb4ab581 100644
+--- a/drivers/crypto/ccp/ccp-dmaengine.c
++++ b/drivers/crypto/ccp/ccp-dmaengine.c
+@@ -642,7 +642,7 @@ static void ccp_dma_release(struct ccp_device *ccp)
+ 		chan = ccp->ccp_dma_chan + i;
+ 		dma_chan = &chan->dma_chan;
+ 
+-		tasklet_kill(&chan->cleanup_tasklet);
++		cancel_work_sync(&chan->cleanup_tasklet);
+ 		list_del_rcu(&dma_chan->device_node);
+ 	}
+ }
+diff --git a/drivers/crypto/ccree/cc_fips.c b/drivers/crypto/ccree/cc_fips.c
+index 702aefc21447..5bba9dca81c6 100644
+--- a/drivers/crypto/ccree/cc_fips.c
++++ b/drivers/crypto/ccree/cc_fips.c
+@@ -4,6 +4,7 @@
+ #include <linux/kernel.h>
+ #include <linux/fips.h>
+ #include <linux/notifier.h>
++#include <linux/workqueue.h>
+ 
+ #include "cc_driver.h"
+ #include "cc_fips.h"
+@@ -11,7 +12,7 @@
+ static void fips_dsr(unsigned long devarg);
+ 
+ struct cc_fips_handle {
+-	struct tasklet_struct tasklet;
++	struct work_struct work;
+ 	struct notifier_block nb;
+ 	struct cc_drvdata *drvdata;
+ };
+@@ -73,8 +74,8 @@ void cc_fips_fini(struct cc_drvdata *drvdata)
+ 
+ 	atomic_notifier_chain_unregister(&fips_fail_notif_chain, &fips_h->nb);
+ 
+-	/* Kill tasklet */
+-	tasklet_kill(&fips_h->tasklet);
++	/* Kill work */
++	cancel_work_sync(&fips_h->work);
+ 	drvdata->fips_handle = NULL;
+ }
+ 
+@@ -85,7 +86,7 @@ void fips_handler(struct cc_drvdata *drvdata)
+ 	if (drvdata->hw_rev < CC_HW_REV_712)
+ 		return;
+ 
+-	tasklet_schedule(&fips_handle_ptr->tasklet);
++	queue_work(system_bh_wq, &fips_handle_ptr->work);
+ }
+ 
+ static inline void tee_fips_error(struct device *dev)
+@@ -108,7 +109,7 @@ void cc_tee_handle_fips_error(struct cc_drvdata *p_drvdata)
+ 		tee_fips_error(dev);
+ }
+ 
+-/* Deferred service handler, run as interrupt-fired tasklet */
++/* Deferred service handler, run as interrupt-fired work */
+ static void fips_dsr(unsigned long devarg)
+ {
+ 	struct cc_drvdata *drvdata = (struct cc_drvdata *)devarg;
+@@ -142,8 +143,8 @@ int cc_fips_init(struct cc_drvdata *p_drvdata)
+ 
+ 	p_drvdata->fips_handle = fips_h;
+ 
+-	dev_dbg(dev, "Initializing fips tasklet\n");
+-	tasklet_init(&fips_h->tasklet, fips_dsr, (unsigned long)p_drvdata);
++	dev_dbg(dev, "Initializing fips work\n");
++	tasklet_init(&fips_h->work, fips_dsr, (unsigned long)p_drvdata);
+ 	fips_h->drvdata = p_drvdata;
+ 	fips_h->nb.notifier_call = cc_ree_fips_failure;
+ 	atomic_notifier_chain_register(&fips_fail_notif_chain, &fips_h->nb);
+diff --git a/drivers/crypto/ccree/cc_request_mgr.c b/drivers/crypto/ccree/cc_request_mgr.c
+index 887162df50f9..6ee0ff8d2d86 100644
+--- a/drivers/crypto/ccree/cc_request_mgr.c
++++ b/drivers/crypto/ccree/cc_request_mgr.c
+@@ -3,6 +3,7 @@
+ 
+ #include <linux/kernel.h>
+ #include <linux/nospec.h>
++#include <linux/workqueue.h>
+ #include "cc_driver.h"
+ #include "cc_buffer_mgr.h"
+ #include "cc_request_mgr.h"
+@@ -39,7 +40,7 @@ struct cc_req_mgr_handle {
+ 	struct workqueue_struct *workq;
+ 	struct delayed_work compwork;
+ #else
+-	struct tasklet_struct comptask;
++	struct work_struct comptask;
+ #endif
+ };
+ 
+@@ -103,8 +104,8 @@ void cc_req_mgr_fini(struct cc_drvdata *drvdata)
+ #ifdef COMP_IN_WQ
+ 	destroy_workqueue(req_mgr_h->workq);
+ #else
+-	/* Kill tasklet */
+-	tasklet_kill(&req_mgr_h->comptask);
++	/* Kill work */
++	cancel_work_sync(&req_mgr_h->comptask);
+ #endif
+ 	kfree_sensitive(req_mgr_h);
+ 	drvdata->request_mgr_handle = NULL;
+@@ -138,7 +139,7 @@ int cc_req_mgr_init(struct cc_drvdata *drvdata)
+ 	}
+ 	INIT_DELAYED_WORK(&req_mgr_h->compwork, comp_work_handler);
+ #else
+-	dev_dbg(dev, "Initializing completion tasklet\n");
++	dev_dbg(dev, "Initializing completion work\n");
+ 	tasklet_init(&req_mgr_h->comptask, comp_handler,
+ 		     (unsigned long)drvdata);
+ #endif
+@@ -338,7 +339,7 @@ static void cc_enqueue_backlog(struct cc_drvdata *drvdata,
+ 	++mgr->bl_len;
+ 	dev_dbg(dev, "+++bl len: %d\n", mgr->bl_len);
+ 	spin_unlock_bh(&mgr->bl_lock);
+-	tasklet_schedule(&mgr->comptask);
++	queue_work(system_bh_wq, &mgr->comptask);
+ }
+ 
+ static void cc_proc_backlog(struct cc_drvdata *drvdata)
+@@ -538,7 +539,7 @@ void complete_request(struct cc_drvdata *drvdata)
+ 	queue_delayed_work(request_mgr_handle->workq,
+ 			   &request_mgr_handle->compwork, 0);
+ #else
+-	tasklet_schedule(&request_mgr_handle->comptask);
++	queue_work(system_bh_wq, &request_mgr_handle->comptask);
+ #endif
+ }
+ 
+@@ -609,7 +610,7 @@ static inline u32 cc_axi_comp_count(struct cc_drvdata *drvdata)
+ 			 cc_ioread(drvdata, drvdata->axim_mon_offset));
+ }
+ 
+-/* Deferred service handler, run as interrupt-fired tasklet */
++/* Deferred service handler, run as interrupt-fired work */
+ static void comp_handler(unsigned long devarg)
+ {
+ 	struct cc_drvdata *drvdata = (struct cc_drvdata *)devarg;
+diff --git a/drivers/crypto/hifn_795x.c b/drivers/crypto/hifn_795x.c
+index b4a4ec35bce0..a445d6fa8d2b 100644
+--- a/drivers/crypto/hifn_795x.c
++++ b/drivers/crypto/hifn_795x.c
+@@ -19,6 +19,7 @@
+ #include <linux/crypto.h>
+ #include <linux/hw_random.h>
+ #include <linux/ktime.h>
++#include <linux/workqueue.h>
+ 
+ #include <crypto/algapi.h>
+ #include <crypto/internal/des.h>
+@@ -423,7 +424,7 @@ struct hifn_device {
+ 
+ 	u8			snum;
+ 
+-	struct tasklet_struct	tasklet;
++	struct work_struct 	work;
+ 
+ 	struct crypto_queue	queue;
+ 	struct list_head	alg_list;
+@@ -1840,7 +1841,7 @@ static void hifn_work(struct work_struct *work)
+ 			dev->reset = 0;
+ 		}
+ 
+-		tasklet_schedule(&dev->tasklet);
++		queue_work(system_bh_wq, &dev->work);
+ 	}
+ 
+ 	schedule_delayed_work(&dev->work, HZ);
+@@ -1904,7 +1905,7 @@ static irqreturn_t hifn_interrupt(int irq, void *data)
+ 		hifn_write_1(dev, HIFN_1_DMA_IER, dev->dmareg);
+ 	}
+ 
+-	tasklet_schedule(&dev->tasklet);
++	queue_work(system_bh_wq, &dev->work);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -2330,7 +2331,7 @@ static int hifn_register_alg(struct hifn_device *dev)
+ 	return err;
+ }
+ 
+-static void hifn_tasklet_callback(unsigned long data)
++static void hifn_work_callback(unsigned long data)
+ {
+ 	struct hifn_device *dev = (struct hifn_device *)data;
+ 
+@@ -2418,7 +2419,7 @@ static int hifn_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ 
+ 	pci_set_drvdata(pdev, dev);
+ 
+-	tasklet_init(&dev->tasklet, hifn_tasklet_callback, (unsigned long)dev);
++	tasklet_init(&dev->work, hifn_work_callback, (unsigned long)dev);
+ 
+ 	crypto_init_queue(&dev->queue, 1);
+ 
+@@ -2458,7 +2459,7 @@ static int hifn_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	hifn_stop_device(dev);
+ err_out_free_irq:
+ 	free_irq(dev->irq, dev);
+-	tasklet_kill(&dev->tasklet);
++	cancel_work_sync(&dev->work);
+ err_out_free_desc:
+ 	dma_free_coherent(&pdev->dev, sizeof(struct hifn_dma), dev->desc_virt,
+ 			  dev->desc_dma);
+@@ -2494,7 +2495,7 @@ static void hifn_remove(struct pci_dev *pdev)
+ 		hifn_stop_device(dev);
+ 
+ 		free_irq(dev->irq, dev);
+-		tasklet_kill(&dev->tasklet);
++		cancel_work_sync(&dev->work);
+ 
+ 		hifn_flush(dev);
+ 
+diff --git a/drivers/crypto/img-hash.c b/drivers/crypto/img-hash.c
+index d269036bdaa3..49b341df4ed0 100644
+--- a/drivers/crypto/img-hash.c
++++ b/drivers/crypto/img-hash.c
+@@ -16,6 +16,7 @@
+ #include <linux/mod_devicetable.h>
+ #include <linux/platform_device.h>
+ #include <linux/scatterlist.h>
++#include <linux/workqueue.h>
+ 
+ #include <crypto/internal/hash.h>
+ #include <crypto/md5.h>
+@@ -126,8 +127,8 @@ struct img_hash_dev {
+ 
+ 	spinlock_t		lock;
+ 	int			err;
+-	struct tasklet_struct	done_task;
+-	struct tasklet_struct	dma_task;
++	struct work_struct 	done_task;
++	struct work_struct 	dma_task;
+ 
+ 	unsigned long		flags;
+ 	struct crypto_queue	queue;
+@@ -217,7 +218,7 @@ static void img_hash_dma_callback(void *data)
+ 		ctx->bufcnt = 0;
+ 	}
+ 	if (ctx->sg)
+-		tasklet_schedule(&hdev->dma_task);
++		queue_work(system_bh_wq, &hdev->dma_task);
+ }
+ 
+ static int img_hash_xmit_dma(struct img_hash_dev *hdev, struct scatterlist *sg)
+@@ -324,7 +325,7 @@ static int img_hash_write_via_dma(struct img_hash_dev *hdev)
+ 
+ 	hdev->flags |= DRIVER_FLAGS_DMA_ACTIVE | DRIVER_FLAGS_FINAL;
+ 
+-	tasklet_schedule(&hdev->dma_task);
++	queue_work(system_bh_wq, &hdev->dma_task);
+ 
+ 	return -EINPROGRESS;
+ }
+@@ -734,7 +735,7 @@ static irqreturn_t img_irq_handler(int irq, void *dev_id)
+ 			hdev->flags |= DRIVER_FLAGS_OUTPUT_READY;
+ 			if (!(DRIVER_FLAGS_CPU & hdev->flags))
+ 				hdev->flags |= DRIVER_FLAGS_DMA_READY;
+-			tasklet_schedule(&hdev->done_task);
++			queue_work(system_bh_wq, &hdev->done_task);
+ 		} else {
+ 			dev_warn(hdev->dev,
+ 				 "HASH interrupt when no active requests.\n");
+@@ -1037,8 +1038,8 @@ static int img_hash_probe(struct platform_device *pdev)
+ clk_err:
+ 	clk_disable_unprepare(hdev->hash_clk);
+ res_err:
+-	tasklet_kill(&hdev->done_task);
+-	tasklet_kill(&hdev->dma_task);
++	cancel_work_sync(&hdev->done_task);
++	cancel_work_sync(&hdev->dma_task);
+ 
+ 	return err;
+ }
+@@ -1054,8 +1055,8 @@ static void img_hash_remove(struct platform_device *pdev)
+ 
+ 	img_unregister_algs(hdev);
+ 
+-	tasklet_kill(&hdev->done_task);
+-	tasklet_kill(&hdev->dma_task);
++	cancel_work_sync(&hdev->done_task);
++	cancel_work_sync(&hdev->dma_task);
+ 
+ 	dma_release_channel(hdev->dma_lch);
+ 
+diff --git a/drivers/crypto/intel/ixp4xx/ixp4xx_crypto.c b/drivers/crypto/intel/ixp4xx/ixp4xx_crypto.c
+index f8a77bff8844..4a20ce55be4e 100644
+--- a/drivers/crypto/intel/ixp4xx/ixp4xx_crypto.c
++++ b/drivers/crypto/intel/ixp4xx/ixp4xx_crypto.c
+@@ -33,6 +33,7 @@
+ 
+ /* Intermittent includes, delete this after v5.14-rc1 */
+ #include <linux/soc/ixp4xx/cpu.h>
++#include <linux/workqueue.h>
+ 
+ #define MAX_KEYLEN 32
+ 
+@@ -346,7 +347,7 @@ static void free_buf_chain(struct device *dev, struct buffer_desc *buf,
+ 	}
+ }
+ 
+-static struct tasklet_struct crypto_done_tasklet;
++static struct work_struct crypto_done_work;
+ 
+ static void finish_scattered_hmac(struct crypt_ctl *crypt)
+ {
+@@ -434,7 +435,7 @@ static void one_packet(dma_addr_t phys)
+ 
+ static void irqhandler(void *_unused)
+ {
+-	tasklet_schedule(&crypto_done_tasklet);
++	queue_work(system_bh_wq, &crypto_done_work);
+ }
+ 
+ static void crypto_done_action(unsigned long arg)
+@@ -447,7 +448,7 @@ static void crypto_done_action(unsigned long arg)
+ 			return;
+ 		one_packet(phys);
+ 	}
+-	tasklet_schedule(&crypto_done_tasklet);
++	queue_work(system_bh_wq, &crypto_done_work);
+ }
+ 
+ static int init_ixp_crypto(struct device *dev)
+@@ -554,7 +555,7 @@ static int init_ixp_crypto(struct device *dev)
+ 		goto err;
+ 	}
+ 	qmgr_set_irq(recv_qid, QUEUE_IRQ_SRC_NOT_EMPTY, irqhandler, NULL);
+-	tasklet_init(&crypto_done_tasklet, crypto_done_action, 0);
++	tasklet_init(&crypto_done_work, crypto_done_action, 0);
+ 
+ 	qmgr_enable_irq(recv_qid);
+ 	return 0;
+@@ -573,7 +574,7 @@ static int init_ixp_crypto(struct device *dev)
+ static void release_ixp_crypto(struct device *dev)
+ {
+ 	qmgr_disable_irq(recv_qid);
+-	tasklet_kill(&crypto_done_tasklet);
++	cancel_work_sync(&crypto_done_work);
+ 
+ 	qmgr_release_queue(send_qid);
+ 	qmgr_release_queue(recv_qid);
+diff --git a/drivers/crypto/intel/qat/qat_common/adf_accel_devices.h b/drivers/crypto/intel/qat/qat_common/adf_accel_devices.h
+index a16c7e6edc65..53bb78562989 100644
+--- a/drivers/crypto/intel/qat/qat_common/adf_accel_devices.h
++++ b/drivers/crypto/intel/qat/qat_common/adf_accel_devices.h
+@@ -9,6 +9,7 @@
+ #include <linux/pci.h>
+ #include <linux/ratelimit.h>
+ #include <linux/types.h>
++#include <linux/workqueue.h>
+ #include "adf_cfg_common.h"
+ #include "adf_rl.h"
+ #include "adf_telemetry.h"
+@@ -391,7 +392,7 @@ struct adf_accel_dev {
+ 		struct {
+ 			bool irq_enabled;
+ 			char irq_name[ADF_MAX_MSIX_VECTOR_NAME];
+-			struct tasklet_struct pf2vf_bh_tasklet;
++			struct work_struct pf2vf_bh_work;
+ 			struct mutex vf2pf_lock; /* protect CSR access */
+ 			struct completion msg_received;
+ 			struct pfvf_message response; /* temp field holding pf2vf response */
+diff --git a/drivers/crypto/intel/qat/qat_common/adf_isr.c b/drivers/crypto/intel/qat/qat_common/adf_isr.c
+index 3557a0d6dea2..1be68dadde2d 100644
+--- a/drivers/crypto/intel/qat/qat_common/adf_isr.c
++++ b/drivers/crypto/intel/qat/qat_common/adf_isr.c
+@@ -308,8 +308,8 @@ static void adf_cleanup_bh(struct adf_accel_dev *accel_dev)
+ 	int i;
+ 
+ 	for (i = 0; i < hw_data->num_banks; i++) {
+-		tasklet_disable(&priv_data->banks[i].resp_handler);
+-		tasklet_kill(&priv_data->banks[i].resp_handler);
++		disable_work_sync(&priv_data->banks[i].resp_handler);
++		cancel_work_sync(&priv_data->banks[i].resp_handler);
+ 	}
+ }
+ 
+diff --git a/drivers/crypto/intel/qat/qat_common/adf_transport_internal.h b/drivers/crypto/intel/qat/qat_common/adf_transport_internal.h
+index 8b2c92ba7ca1..af333ea5fb37 100644
+--- a/drivers/crypto/intel/qat/qat_common/adf_transport_internal.h
++++ b/drivers/crypto/intel/qat/qat_common/adf_transport_internal.h
+@@ -30,7 +30,7 @@ struct adf_etr_ring_data {
+ 
+ struct adf_etr_bank_data {
+ 	struct adf_etr_ring_data *rings;
+-	struct tasklet_struct resp_handler;
++	struct work_struct resp_handler;
+ 	void __iomem *csr_addr;
+ 	u32 irq_coalesc_timer;
+ 	u32 bank_number;
+@@ -50,6 +50,7 @@ struct adf_etr_data {
+ void adf_response_handler(uintptr_t bank_addr);
+ #ifdef CONFIG_DEBUG_FS
+ #include <linux/debugfs.h>
++#include <linux/workqueue.h>
+ int adf_bank_debugfs_add(struct adf_etr_bank_data *bank);
+ void adf_bank_debugfs_rm(struct adf_etr_bank_data *bank);
+ int adf_ring_debugfs_add(struct adf_etr_ring_data *ring, const char *name);
+diff --git a/drivers/crypto/intel/qat/qat_common/adf_vf_isr.c b/drivers/crypto/intel/qat/qat_common/adf_vf_isr.c
+index b05c3957a160..d6175f63f21c 100644
+--- a/drivers/crypto/intel/qat/qat_common/adf_vf_isr.c
++++ b/drivers/crypto/intel/qat/qat_common/adf_vf_isr.c
+@@ -122,8 +122,8 @@ static int adf_setup_pf2vf_bh(struct adf_accel_dev *accel_dev)
+ 
+ static void adf_cleanup_pf2vf_bh(struct adf_accel_dev *accel_dev)
+ {
+-	tasklet_disable(&accel_dev->vf.pf2vf_bh_tasklet);
+-	tasklet_kill(&accel_dev->vf.pf2vf_bh_tasklet);
++	disable_work_sync(&accel_dev->vf.pf2vf_bh_tasklet);
++	cancel_work_sync(&accel_dev->vf.pf2vf_bh_tasklet);
+ 	mutex_destroy(&accel_dev->vf.vf2pf_lock);
+ }
+ 
+@@ -211,8 +211,8 @@ static void adf_cleanup_bh(struct adf_accel_dev *accel_dev)
+ {
+ 	struct adf_etr_data *priv_data = accel_dev->transport;
+ 
+-	tasklet_disable(&priv_data->banks[0].resp_handler);
+-	tasklet_kill(&priv_data->banks[0].resp_handler);
++	disable_work_sync(&priv_data->banks[0].resp_handler);
++	cancel_work_sync(&priv_data->banks[0].resp_handler);
+ }
+ 
+ /**
+diff --git a/drivers/crypto/marvell/octeontx/otx_cptvf.h b/drivers/crypto/marvell/octeontx/otx_cptvf.h
+index dd02f21659af..eab1b508a682 100644
+--- a/drivers/crypto/marvell/octeontx/otx_cptvf.h
++++ b/drivers/crypto/marvell/octeontx/otx_cptvf.h
+@@ -14,6 +14,7 @@
+ #include <linux/list.h>
+ #include <linux/interrupt.h>
+ #include <linux/device.h>
++#include <linux/workqueue.h>
+ #include "otx_cpt_common.h"
+ #include "otx_cptvf_reqmgr.h"
+ 
+@@ -58,7 +59,7 @@ struct otx_cpt_pending_qinfo {
+ 		     q = &qinfo->queue[i])
+ 
+ struct otx_cptvf_wqe {
+-	struct tasklet_struct twork;
++	struct work_struct twork;
+ 	struct otx_cptvf *cptvf;
+ };
+ 
+diff --git a/drivers/crypto/marvell/octeontx/otx_cptvf_main.c b/drivers/crypto/marvell/octeontx/otx_cptvf_main.c
+index 88a41d1ca5f6..825a048646f8 100644
+--- a/drivers/crypto/marvell/octeontx/otx_cptvf_main.c
++++ b/drivers/crypto/marvell/octeontx/otx_cptvf_main.c
+@@ -66,7 +66,7 @@ static void cleanup_worker_threads(struct otx_cptvf *cptvf)
+ 	}
+ 
+ 	for (i = 0; i < cptvf->num_queues; i++)
+-		tasklet_kill(&cwqe_info->vq_wqe[i].twork);
++		cancel_work_sync(&cwqe_info->vq_wqe[i].twork);
+ 
+ 	kfree_sensitive(cwqe_info);
+ 	cptvf->wqe_info = NULL;
+diff --git a/drivers/crypto/marvell/octeontx2/otx2_cptlf.h b/drivers/crypto/marvell/octeontx2/otx2_cptlf.h
+index bd8604be2952..882f288e544d 100644
+--- a/drivers/crypto/marvell/octeontx2/otx2_cptlf.h
++++ b/drivers/crypto/marvell/octeontx2/otx2_cptlf.h
+@@ -6,6 +6,7 @@
+ 
+ #include <linux/soc/marvell/octeontx2/asm.h>
+ #include <linux/bitfield.h>
++#include <linux/workqueue.h>
+ #include <mbox.h>
+ #include <rvu.h>
+ #include "otx2_cpt_common.h"
+@@ -75,7 +76,7 @@ struct otx2_cpt_inst_queue {
+ 
+ struct otx2_cptlfs_info;
+ struct otx2_cptlf_wqe {
+-	struct tasklet_struct work;
++	struct work_struct work;
+ 	struct otx2_cptlfs_info *lfs;
+ 	u8 lf_num;
+ };
+@@ -92,7 +93,7 @@ struct otx2_cptlf_info {
+ 
+ 	struct otx2_cpt_inst_queue iqueue;/* Instruction queue */
+ 	struct otx2_cpt_pending_queue pqueue; /* Pending queue */
+-	struct otx2_cptlf_wqe *wqe;       /* Tasklet work info */
++	struct otx2_cptlf_wqe *wqe;       /* Work work info */
+ };
+ 
+ struct cpt_hw_ops {
+diff --git a/drivers/crypto/marvell/octeontx2/otx2_cptvf_main.c b/drivers/crypto/marvell/octeontx2/otx2_cptvf_main.c
+index 527d34cc258b..0535e5b83560 100644
+--- a/drivers/crypto/marvell/octeontx2/otx2_cptvf_main.c
++++ b/drivers/crypto/marvell/octeontx2/otx2_cptvf_main.c
+@@ -138,7 +138,7 @@ static void cleanup_tasklet_work(struct otx2_cptlfs_info *lfs)
+ 		if (!lfs->lf[i].wqe)
+ 			continue;
+ 
+-		tasklet_kill(&lfs->lf[i].wqe->work);
++		cancel_work_sync(&lfs->lf[i].wqe->work);
+ 		kfree(lfs->lf[i].wqe);
+ 		lfs->lf[i].wqe = NULL;
+ 	}
+@@ -225,7 +225,7 @@ static int lf_sw_init(struct otx2_cptlfs_info *lfs)
+ 	ret = init_tasklet_work(lfs);
+ 	if (ret) {
+ 		dev_err(&lfs->pdev->dev,
+-			"Tasklet work init failed\n");
++			"Work work init failed\n");
+ 		goto pending_queues_free;
+ 	}
+ 	return 0;
+diff --git a/drivers/crypto/omap-aes.c b/drivers/crypto/omap-aes.c
+index bad1adacbc84..afac5d1c39c7 100644
+--- a/drivers/crypto/omap-aes.c
++++ b/drivers/crypto/omap-aes.c
+@@ -1245,7 +1245,7 @@ static int omap_aes_probe(struct platform_device *pdev)
+ 
+ 	omap_aes_dma_cleanup(dd);
+ err_irq:
+-	tasklet_kill(&dd->done_task);
++	cancel_work_sync(&dd->done_task);
+ err_pm_disable:
+ 	pm_runtime_disable(dev);
+ err_res:
+@@ -1280,7 +1280,7 @@ static void omap_aes_remove(struct platform_device *pdev)
+ 
+ 	crypto_engine_exit(dd->engine);
+ 
+-	tasklet_kill(&dd->done_task);
++	cancel_work_sync(&dd->done_task);
+ 	omap_aes_dma_cleanup(dd);
+ 	pm_runtime_disable(dd->dev);
+ 
+diff --git a/drivers/crypto/omap-aes.h b/drivers/crypto/omap-aes.h
+index 0f35c9164764..c8ca94770c67 100644
+--- a/drivers/crypto/omap-aes.h
++++ b/drivers/crypto/omap-aes.h
+@@ -161,7 +161,7 @@ struct omap_aes_dev {
+ 	unsigned long		flags;
+ 	int			err;
+ 
+-	struct tasklet_struct	done_task;
++	struct work_struct 	done_task;
+ 	struct aead_queue	aead_queue;
+ 	spinlock_t		lock;
+ 
+diff --git a/drivers/crypto/omap-des.c b/drivers/crypto/omap-des.c
+index 209d3dc03a9b..c7ce573ae787 100644
+--- a/drivers/crypto/omap-des.c
++++ b/drivers/crypto/omap-des.c
+@@ -33,6 +33,7 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/scatterlist.h>
+ #include <linux/string.h>
++#include <linux/workqueue.h>
+ 
+ #include "omap-crypto.h"
+ 
+@@ -133,7 +134,7 @@ struct omap_des_dev {
+ 	unsigned long		flags;
+ 	int			err;
+ 
+-	struct tasklet_struct	done_task;
++	struct work_struct 	done_task;
+ 
+ 	struct skcipher_request	*req;
+ 	struct crypto_engine		*engine;
+@@ -328,7 +329,7 @@ static void omap_des_dma_out_callback(void *data)
+ 	struct omap_des_dev *dd = data;
+ 
+ 	/* dma_lch_out - completed */
+-	tasklet_schedule(&dd->done_task);
++	queue_work(system_bh_wq, &dd->done_task);
+ }
+ 
+ static int omap_des_dma_init(struct omap_des_dev *dd)
+@@ -899,7 +900,7 @@ static irqreturn_t omap_des_irq(int irq, void *dev_id)
+ 
+ 		if (!dd->total)
+ 			/* All bytes read! */
+-			tasklet_schedule(&dd->done_task);
++			queue_work(system_bh_wq, &dd->done_task);
+ 		else
+ 			/* Enable DATA_IN interrupt for next block */
+ 			omap_des_write(dd, DES_REG_IRQ_ENABLE(dd), 0x2);
+@@ -1062,7 +1063,7 @@ static int omap_des_probe(struct platform_device *pdev)
+ 
+ 	omap_des_dma_cleanup(dd);
+ err_irq:
+-	tasklet_kill(&dd->done_task);
++	cancel_work_sync(&dd->done_task);
+ err_get:
+ 	pm_runtime_disable(dev);
+ err_res:
+@@ -1086,7 +1087,7 @@ static void omap_des_remove(struct platform_device *pdev)
+ 			crypto_engine_unregister_skcipher(
+ 					&dd->pdata->algs_info[i].algs_list[j]);
+ 
+-	tasklet_kill(&dd->done_task);
++	cancel_work_sync(&dd->done_task);
+ 	omap_des_dma_cleanup(dd);
+ 	pm_runtime_disable(dd->dev);
+ }
+diff --git a/drivers/crypto/omap-sham.c b/drivers/crypto/omap-sham.c
+index 5bcd9ab0f72a..89d67b853867 100644
+--- a/drivers/crypto/omap-sham.c
++++ b/drivers/crypto/omap-sham.c
+@@ -37,6 +37,7 @@
+ #include <linux/scatterlist.h>
+ #include <linux/slab.h>
+ #include <linux/string.h>
++#include <linux/workqueue.h>
+ 
+ #define MD5_DIGEST_SIZE			16
+ 
+@@ -217,7 +218,7 @@ struct omap_sham_dev {
+ 	int			irq;
+ 	int			err;
+ 	struct dma_chan		*dma_lch;
+-	struct tasklet_struct	done_task;
++	struct work_struct 	done_task;
+ 	u8			polling_mode;
+ 	u8			xmit_buf[BUFLEN] OMAP_ALIGNED;
+ 
+@@ -561,7 +562,7 @@ static void omap_sham_dma_callback(void *param)
+ 	struct omap_sham_dev *dd = param;
+ 
+ 	set_bit(FLAGS_DMA_READY, &dd->flags);
+-	tasklet_schedule(&dd->done_task);
++	queue_work(system_bh_wq, &dd->done_task);
+ }
+ 
+ static int omap_sham_xmit_dma(struct omap_sham_dev *dd, size_t length,
+@@ -1740,7 +1741,7 @@ static void omap_sham_done_task(unsigned long data)
+ static irqreturn_t omap_sham_irq_common(struct omap_sham_dev *dd)
+ {
+ 	set_bit(FLAGS_OUTPUT_READY, &dd->flags);
+-	tasklet_schedule(&dd->done_task);
++	queue_work(system_bh_wq, &dd->done_task);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -2204,7 +2205,7 @@ static void omap_sham_remove(struct platform_device *pdev)
+ 					&dd->pdata->algs_info[i].algs_list[j]);
+ 			dd->pdata->algs_info[i].registered--;
+ 		}
+-	tasklet_kill(&dd->done_task);
++	cancel_work_sync(&dd->done_task);
+ 	pm_runtime_dont_use_autosuspend(&pdev->dev);
+ 	pm_runtime_disable(&pdev->dev);
+ 
+diff --git a/drivers/crypto/qce/core.c b/drivers/crypto/qce/core.c
+index 28b5fd823827..51ed31bb4619 100644
+--- a/drivers/crypto/qce/core.c
++++ b/drivers/crypto/qce/core.c
+@@ -281,7 +281,7 @@ static void qce_crypto_remove(struct platform_device *pdev)
+ {
+ 	struct qce_device *qce = platform_get_drvdata(pdev);
+ 
+-	tasklet_kill(&qce->done_tasklet);
++	cancel_work_sync(&qce->done_tasklet);
+ 	qce_unregister_algs(qce);
+ 	qce_dma_release(&qce->dma);
+ 	clk_disable_unprepare(qce->bus);
+diff --git a/drivers/crypto/qce/core.h b/drivers/crypto/qce/core.h
+index 228fcd69ec51..e264ada8bcde 100644
+--- a/drivers/crypto/qce/core.h
++++ b/drivers/crypto/qce/core.h
+@@ -12,7 +12,7 @@
+  * struct qce_device - crypto engine device structure
+  * @queue: crypto request queue
+  * @lock: the lock protects queue and req
+- * @done_tasklet: done tasklet object
++ * @done_work: done work object
+  * @req: current active request
+  * @result: result of current transform
+  * @base: virtual IO base
+@@ -29,7 +29,7 @@
+ struct qce_device {
+ 	struct crypto_queue queue;
+ 	spinlock_t lock;
+-	struct tasklet_struct done_tasklet;
++	struct work_struct done_work;
+ 	struct crypto_async_request *req;
+ 	int result;
+ 	void __iomem *base;
+diff --git a/drivers/crypto/s5p-sss.c b/drivers/crypto/s5p-sss.c
+index 8b6e3f5c94de..a2d480701f7c 100644
+--- a/drivers/crypto/s5p-sss.c
++++ b/drivers/crypto/s5p-sss.c
+@@ -22,6 +22,7 @@
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/scatterlist.h>
++#include <linux/workqueue.h>
+ 
+ #include <crypto/ctr.h>
+ #include <crypto/aes.h>
+@@ -211,7 +212,7 @@
+  * HASH bit numbers, used by device, setting in dev->hash_flags with
+  * functions set_bit(), clear_bit() or tested with test_bit() or BIT(),
+  * to keep HASH state BUSY or FREE, or to signal state from irq_handler
+- * to hash_tasklet. SGS keep track of allocated memory for scatterlist
++ * to hash_work. SGS keep track of allocated memory for scatterlist
+  */
+ #define HASH_FLAGS_BUSY		0
+ #define HASH_FLAGS_FINAL	1
+@@ -272,7 +273,7 @@ struct s5p_aes_ctx {
+  *		with source data.
+  * @sg_dst_cpy:	In case of unaligned access, copied scatter list
+  *		with destination data.
+- * @tasklet:	New request scheduling jib
++ * @work:	New request scheduling jib
+  * @queue:	Crypto queue
+  * @busy:	Indicates whether the device is currently handling some request
+  *		thus it uses some of the fields from this state, like:
+@@ -286,7 +287,7 @@ struct s5p_aes_ctx {
+  *		variable.
+  * @hash_flags:	Flags for current HASH op.
+  * @hash_queue:	Async hash queue.
+- * @hash_tasklet: New HASH request scheduling job.
++ * @hash_work: New HASH request scheduling job.
+  * @xmit_buf:	Buffer for current HASH request transfer into SSS block.
+  * @hash_req:	Current request sending to SSS HASH block.
+  * @hash_sg_iter: Scatterlist transferred through DMA into SSS HASH block.
+@@ -310,7 +311,7 @@ struct s5p_aes_dev {
+ 	struct scatterlist		*sg_src_cpy;
+ 	struct scatterlist		*sg_dst_cpy;
+ 
+-	struct tasklet_struct		tasklet;
++	struct work_struct 		work;
+ 	struct crypto_queue		queue;
+ 	bool				busy;
+ 	spinlock_t			lock;
+@@ -321,7 +322,7 @@ struct s5p_aes_dev {
+ 	spinlock_t			hash_lock; /* protect hash_ vars */
+ 	unsigned long			hash_flags;
+ 	struct crypto_queue		hash_queue;
+-	struct tasklet_struct		hash_tasklet;
++	struct work_struct 		hash_work;
+ 
+ 	u8				xmit_buf[BUFLEN];
+ 	struct ahash_request		*hash_req;
+@@ -673,7 +674,7 @@ static irqreturn_t s5p_aes_interrupt(int irq, void *dev_id)
+ 	 * In case of such mapping error, s5p_aes_complete() should be called.
+ 	 *
+ 	 * If there is no more data in tx scatter list, call s5p_aes_complete()
+-	 * and schedule new tasklet.
++	 * and schedule new work.
+ 	 *
+ 	 * Handle hx interrupt. If there is still data map next entry.
+ 	 */
+@@ -729,7 +730,7 @@ static irqreturn_t s5p_aes_interrupt(int irq, void *dev_id)
+ 
+ 		s5p_aes_complete(dev->req, 0);
+ 		/* Device is still busy */
+-		tasklet_schedule(&dev->tasklet);
++		queue_work(system_bh_wq, &dev->work);
+ 	} else {
+ 		/*
+ 		 * Writing length of DMA block (either receiving or
+@@ -766,7 +767,7 @@ static irqreturn_t s5p_aes_interrupt(int irq, void *dev_id)
+ 	 *   issue SSS_HASH_PAUSE and wait for HPART irq
+ 	 */
+ 	if (hx_end)
+-		tasklet_schedule(&dev->hash_tasklet);
++		queue_work(system_bh_wq, &dev->hash_work);
+ 	else if (err_dma_hx == 2)
+ 		s5p_hash_write(dev, SSS_REG_HASH_CTRL_PAUSE,
+ 			       SSS_HASH_PAUSE);
+@@ -1420,7 +1421,7 @@ static int s5p_hash_handle_queue(struct s5p_aes_dev *dd,
+ 	}
+ out:
+ 	if (err != -EINPROGRESS) {
+-		/* hash_tasklet_cb will not finish it, so do it here */
++		/* hash_work_cb will not finish it, so do it here */
+ 		s5p_hash_finish_req(req, err);
+ 		req = NULL;
+ 
+@@ -1435,10 +1436,10 @@ static int s5p_hash_handle_queue(struct s5p_aes_dev *dd,
+ }
+ 
+ /**
+- * s5p_hash_tasklet_cb() - hash tasklet
++ * s5p_hash_work_cb() - hash work
+  * @data:	ptr to s5p_aes_dev
+  */
+-static void s5p_hash_tasklet_cb(unsigned long data)
++static void s5p_hash_work_cb(unsigned long data)
+ {
+ 	struct s5p_aes_dev *dd = (struct s5p_aes_dev *)data;
+ 
+@@ -1965,7 +1966,7 @@ static void s5p_aes_crypt_start(struct s5p_aes_dev *dev, unsigned long mode)
+ 	s5p_aes_complete(req, err);
+ }
+ 
+-static void s5p_tasklet_cb(unsigned long data)
++static void s5p_work_cb(unsigned long data)
+ {
+ 	struct s5p_aes_dev *dev = (struct s5p_aes_dev *)data;
+ 	struct crypto_async_request *async_req, *backlog;
+@@ -2009,7 +2010,7 @@ static int s5p_aes_handle_req(struct s5p_aes_dev *dev,
+ 
+ 	spin_unlock_irqrestore(&dev->lock, flags);
+ 
+-	tasklet_schedule(&dev->tasklet);
++	queue_work(system_bh_wq, &dev->work);
+ 
+ 	return err;
+ }
+@@ -2250,7 +2251,7 @@ static int s5p_aes_probe(struct platform_device *pdev)
+ 	platform_set_drvdata(pdev, pdata);
+ 	s5p_dev = pdata;
+ 
+-	tasklet_init(&pdata->tasklet, s5p_tasklet_cb, (unsigned long)pdata);
++	tasklet_init(&pdata->work, s5p_work_cb, (unsigned long)pdata);
+ 	crypto_init_queue(&pdata->queue, CRYPTO_QUEUE_LEN);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(algs); i++) {
+@@ -2260,7 +2261,7 @@ static int s5p_aes_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	if (pdata->use_hash) {
+-		tasklet_init(&pdata->hash_tasklet, s5p_hash_tasklet_cb,
++		tasklet_init(&pdata->hash_work, s5p_hash_work_cb,
+ 			     (unsigned long)pdata);
+ 		crypto_init_queue(&pdata->hash_queue, SSS_HASH_QUEUE_LENGTH);
+ 
+@@ -2286,7 +2287,7 @@ static int s5p_aes_probe(struct platform_device *pdev)
+ 	for (j = hash_i - 1; j >= 0; j--)
+ 		crypto_unregister_ahash(&algs_sha1_md5_sha256[j]);
+ 
+-	tasklet_kill(&pdata->hash_tasklet);
++	cancel_work_sync(&pdata->hash_work);
+ 	res->end -= 0x300;
+ 
+ err_algs:
+@@ -2297,7 +2298,7 @@ static int s5p_aes_probe(struct platform_device *pdev)
+ 	for (j = 0; j < i; j++)
+ 		crypto_unregister_skcipher(&algs[j]);
+ 
+-	tasklet_kill(&pdata->tasklet);
++	cancel_work_sync(&pdata->work);
+ 
+ err_irq:
+ 	clk_disable_unprepare(pdata->pclk);
+@@ -2317,13 +2318,13 @@ static void s5p_aes_remove(struct platform_device *pdev)
+ 	for (i = 0; i < ARRAY_SIZE(algs); i++)
+ 		crypto_unregister_skcipher(&algs[i]);
+ 
+-	tasklet_kill(&pdata->tasklet);
++	cancel_work_sync(&pdata->work);
+ 	if (pdata->use_hash) {
+ 		for (i = ARRAY_SIZE(algs_sha1_md5_sha256) - 1; i >= 0; i--)
+ 			crypto_unregister_ahash(&algs_sha1_md5_sha256[i]);
+ 
+ 		pdata->res->end -= 0x300;
+-		tasklet_kill(&pdata->hash_tasklet);
++		cancel_work_sync(&pdata->hash_work);
+ 		pdata->use_hash = false;
+ 	}
+ 
+diff --git a/drivers/crypto/starfive/jh7110-cryp.c b/drivers/crypto/starfive/jh7110-cryp.c
+index 425fddf3a8ab..03bf55d58d91 100644
+--- a/drivers/crypto/starfive/jh7110-cryp.c
++++ b/drivers/crypto/starfive/jh7110-cryp.c
+@@ -219,8 +219,8 @@ static int starfive_cryp_probe(struct platform_device *pdev)
+ 	clk_disable_unprepare(cryp->ahb);
+ 	reset_control_assert(cryp->rst);
+ 
+-	tasklet_kill(&cryp->aes_done);
+-	tasklet_kill(&cryp->hash_done);
++	cancel_work_sync(&cryp->aes_done);
++	cancel_work_sync(&cryp->hash_done);
+ 
+ 	return ret;
+ }
+@@ -233,8 +233,8 @@ static void starfive_cryp_remove(struct platform_device *pdev)
+ 	starfive_hash_unregister_algs();
+ 	starfive_rsa_unregister_algs();
+ 
+-	tasklet_kill(&cryp->aes_done);
+-	tasklet_kill(&cryp->hash_done);
++	cancel_work_sync(&cryp->aes_done);
++	cancel_work_sync(&cryp->hash_done);
+ 
+ 	crypto_engine_stop(cryp->engine);
+ 	crypto_engine_exit(cryp->engine);
+diff --git a/drivers/crypto/starfive/jh7110-cryp.h b/drivers/crypto/starfive/jh7110-cryp.h
+index 6cdf6db5d904..ba36ce05dfda 100644
+--- a/drivers/crypto/starfive/jh7110-cryp.h
++++ b/drivers/crypto/starfive/jh7110-cryp.h
+@@ -11,6 +11,7 @@
+ #include <linux/dma-mapping.h>
+ #include <linux/dmaengine.h>
+ #include <linux/interrupt.h>
++#include <linux/workqueue.h>
+ 
+ #define STARFIVE_ALG_CR_OFFSET			0x0
+ #define STARFIVE_ALG_FIFO_OFFSET		0x4
+@@ -188,8 +189,8 @@ struct starfive_cryp_dev {
+ 	struct scatter_walk			in_walk;
+ 	struct scatter_walk			out_walk;
+ 	struct crypto_engine			*engine;
+-	struct tasklet_struct			aes_done;
+-	struct tasklet_struct			hash_done;
++	struct work_struct 			aes_done;
++	struct work_struct 			hash_done;
+ 	size_t					assoclen;
+ 	size_t					total_in;
+ 	size_t					total_out;
+diff --git a/drivers/crypto/talitos.c b/drivers/crypto/talitos.c
+index 511ddcb0efd4..67097b65307d 100644
+--- a/drivers/crypto/talitos.c
++++ b/drivers/crypto/talitos.c
+@@ -3168,9 +3168,9 @@ static void talitos_remove(struct platform_device *ofdev)
+ 			irq_dispose_mapping(priv->irq[i]);
+ 		}
+ 
+-	tasklet_kill(&priv->done_task[0]);
++	cancel_work_sync(&priv->done_task[0]);
+ 	if (priv->irq[1])
+-		tasklet_kill(&priv->done_task[1]);
++		cancel_work_sync(&priv->done_task[1]);
+ }
+ 
+ static struct talitos_crypto_alg *talitos_alg_alloc(struct device *dev,
+diff --git a/drivers/crypto/talitos.h b/drivers/crypto/talitos.h
+index 1a93ee355929..0ee60d24a87d 100644
+--- a/drivers/crypto/talitos.h
++++ b/drivers/crypto/talitos.h
+@@ -144,8 +144,8 @@ struct talitos_private {
+ 	/* next channel to be assigned next incoming descriptor */
+ 	atomic_t last_chan ____cacheline_aligned;
+ 
+-	/* request callback tasklet */
+-	struct tasklet_struct done_task[2];
++	/* request callback work */
++	struct work_struct done_task[2];
+ 
+ 	/* list of registered algorithms */
+ 	struct list_head alg_list;
+diff --git a/drivers/crypto/virtio/virtio_crypto_common.h b/drivers/crypto/virtio/virtio_crypto_common.h
+index 7059bbe5a2eb..038352611102 100644
+--- a/drivers/crypto/virtio/virtio_crypto_common.h
++++ b/drivers/crypto/virtio/virtio_crypto_common.h
+@@ -11,6 +11,7 @@
+ #include <linux/crypto.h>
+ #include <linux/spinlock.h>
+ #include <linux/interrupt.h>
++#include <linux/workqueue.h>
+ #include <crypto/aead.h>
+ #include <crypto/aes.h>
+ #include <crypto/engine.h>
+@@ -29,7 +30,7 @@ struct data_queue {
+ 	char name[32];
+ 
+ 	struct crypto_engine *engine;
+-	struct tasklet_struct done_task;
++	struct work_struct done_task;
+ };
+ 
+ struct virtio_crypto {
+diff --git a/drivers/crypto/virtio/virtio_crypto_core.c b/drivers/crypto/virtio/virtio_crypto_core.c
+index b909c6a2bf1c..2a796adbcc64 100644
+--- a/drivers/crypto/virtio/virtio_crypto_core.c
++++ b/drivers/crypto/virtio/virtio_crypto_core.c
+@@ -508,7 +508,7 @@ static void virtcrypto_remove(struct virtio_device *vdev)
+ 	if (virtcrypto_dev_started(vcrypto))
+ 		virtcrypto_dev_stop(vcrypto);
+ 	for (i = 0; i < vcrypto->max_data_queues; i++)
+-		tasklet_kill(&vcrypto->data_vq[i].done_task);
++		cancel_work_sync(&vcrypto->data_vq[i].done_task);
+ 	virtio_reset_device(vdev);
+ 	virtcrypto_free_unused_reqs(vcrypto);
+ 	virtcrypto_clear_crypto_engines(vcrypto);
+-- 
+2.17.1
+

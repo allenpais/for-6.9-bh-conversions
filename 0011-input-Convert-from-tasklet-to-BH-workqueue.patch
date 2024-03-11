@@ -1,0 +1,105 @@
+From 6c0d75ae8f1316359f81191c8a18ab8110fe3ad3 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:14:05 +0000
+Subject: [PATCH 11/18] input: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/input/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/input/keyboard/omap-keypad.c | 6 +++---
+ drivers/input/serio/hil_mlc.c        | 4 ++--
+ drivers/input/serio/hp_sdc.c         | 2 +-
+ drivers/input/serio/hp_sdc_mlc.c     | 2 +-
+ 4 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/input/keyboard/omap-keypad.c b/drivers/input/keyboard/omap-keypad.c
+index 454fb8675657..769adcd17abd 100644
+--- a/drivers/input/keyboard/omap-keypad.c
++++ b/drivers/input/keyboard/omap-keypad.c
+@@ -224,7 +224,7 @@ static int omap_kp_probe(struct platform_device *pdev)
+ 
+ 	/* get the irq and init timer*/
+ 	kp_tasklet.data = (unsigned long) omap_kp;
+-	tasklet_enable(&kp_tasklet);
++	enable_and_queue_work(system_bh_wq, &kp_tasklet);
+ 
+ 	ret = device_create_file(&pdev->dev, &dev_attr_enable);
+ 	if (ret < 0)
+@@ -292,12 +292,12 @@ static void omap_kp_remove(struct platform_device *pdev)
+ 	struct omap_kp *omap_kp = platform_get_drvdata(pdev);
+ 
+ 	/* disable keypad interrupt handling */
+-	tasklet_disable(&kp_tasklet);
++	disable_work_sync(&kp_tasklet);
+ 	omap_writew(1, OMAP1_MPUIO_BASE + OMAP_MPUIO_KBD_MASKIT);
+ 	free_irq(omap_kp->irq, omap_kp);
+ 
+ 	timer_shutdown_sync(&omap_kp->timer);
+-	tasklet_kill(&kp_tasklet);
++	cancel_work_sync(&kp_tasklet);
+ 
+ 	/* unregister everything */
+ 	input_unregister_device(omap_kp->input);
+diff --git a/drivers/input/serio/hil_mlc.c b/drivers/input/serio/hil_mlc.c
+index d36e89d6fc54..a5ae9cb38ee3 100644
+--- a/drivers/input/serio/hil_mlc.c
++++ b/drivers/input/serio/hil_mlc.c
+@@ -1010,7 +1010,7 @@ static int __init hil_mlc_init(void)
+ 	timer_setup(&hil_mlcs_kicker, &hil_mlcs_timer, 0);
+ 	mod_timer(&hil_mlcs_kicker, jiffies + HZ);
+ 
+-	tasklet_enable(&hil_mlcs_tasklet);
++	enable_and_queue_work(system_bh_wq, &hil_mlcs_tasklet);
+ 
+ 	return 0;
+ }
+@@ -1018,7 +1018,7 @@ static int __init hil_mlc_init(void)
+ static void __exit hil_mlc_exit(void)
+ {
+ 	del_timer_sync(&hil_mlcs_kicker);
+-	tasklet_kill(&hil_mlcs_tasklet);
++	cancel_work_sync(&hil_mlcs_tasklet);
+ }
+ 
+ module_init(hil_mlc_init);
+diff --git a/drivers/input/serio/hp_sdc.c b/drivers/input/serio/hp_sdc.c
+index 13eacf6ab431..f2bbca7df4df 100644
+--- a/drivers/input/serio/hp_sdc.c
++++ b/drivers/input/serio/hp_sdc.c
+@@ -982,7 +982,7 @@ static void hp_sdc_exit(void)
+ 
+ 	del_timer_sync(&hp_sdc.kicker);
+ 
+-	tasklet_kill(&hp_sdc.task);
++	cancel_work_sync(&hp_sdc.task);
+ 
+ #if defined(__hppa__)
+ 	cancel_delayed_work_sync(&moduleloader_work);
+diff --git a/drivers/input/serio/hp_sdc_mlc.c b/drivers/input/serio/hp_sdc_mlc.c
+index 3e85e9039374..20ae5a5abe99 100644
+--- a/drivers/input/serio/hp_sdc_mlc.c
++++ b/drivers/input/serio/hp_sdc_mlc.c
+@@ -138,7 +138,7 @@ static void hp_sdc_mlc_isr (int irq, void *dev_id,
+ }
+ 
+ 
+-/******************** Tasklet or userspace context functions ****************/
++/******************** Work or userspace context functions ****************/
+ 
+ static int hp_sdc_mlc_in(hil_mlc *mlc, suseconds_t timeout)
+ {
+-- 
+2.17.1
+

@@ -1,0 +1,88 @@
+From 0c3821e371750b221d2c2435b15e9a4df4d09b80 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:15:55 +0000
+Subject: [PATCH 14/18] misc: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/misc/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/misc/ibmvmc.c | 8 ++++----
+ drivers/misc/ibmvmc.h | 3 ++-
+ 2 files changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/misc/ibmvmc.c b/drivers/misc/ibmvmc.c
+index e5f935b5249d..56258b00d22f 100644
+--- a/drivers/misc/ibmvmc.c
++++ b/drivers/misc/ibmvmc.c
+@@ -145,7 +145,7 @@ static void ibmvmc_release_crq_queue(struct crq_server_adapter *adapter)
+ 	struct crq_queue *queue = &adapter->queue;
+ 
+ 	free_irq(vdev->irq, (void *)adapter);
+-	tasklet_kill(&adapter->work_task);
++	cancel_work_sync(&adapter->work_task);
+ 
+ 	if (adapter->reset_task)
+ 		kthread_stop(adapter->reset_task);
+@@ -1820,7 +1820,7 @@ static int ibmvmc_reset_task(void *data)
+ 			break;
+ 
+ 		dev_dbg(adapter->dev, "CRQ resetting in process context");
+-		tasklet_disable(&adapter->work_task);
++		disable_work_sync(&adapter->work_task);
+ 
+ 		rc = ibmvmc_reset_crq_queue(adapter);
+ 
+@@ -1837,7 +1837,7 @@ static int ibmvmc_reset_task(void *data)
+ 		}
+ 
+ 		vio_enable_interrupts(to_vio_dev(adapter->dev));
+-		tasklet_enable(&adapter->work_task);
++		enable_and_queue_work(system_bh_wq, &adapter->work_task);
+ 	}
+ 
+ 	return 0;
+@@ -2172,7 +2172,7 @@ static int ibmvmc_init_crq_queue(struct crq_server_adapter *adapter)
+ 	/* Cannot have any work since we either never got our IRQ registered,
+ 	 * or never got interrupts enabled
+ 	 */
+-	tasklet_kill(&adapter->work_task);
++	cancel_work_sync(&adapter->work_task);
+ 	h_free_crq(vdev->unit_address);
+ reg_crq_failed:
+ 	dma_unmap_single(adapter->dev,
+diff --git a/drivers/misc/ibmvmc.h b/drivers/misc/ibmvmc.h
+index 0e1756fffeae..31995355f379 100644
+--- a/drivers/misc/ibmvmc.h
++++ b/drivers/misc/ibmvmc.h
+@@ -15,6 +15,7 @@
+ 
+ #include <linux/types.h>
+ #include <linux/cdev.h>
++#include <linux/workqueue.h>
+ 
+ #include <asm/vio.h>
+ 
+@@ -162,7 +163,7 @@ struct crq_server_adapter {
+ 	struct crq_queue queue;
+ 	u32 liobn;
+ 	u32 riobn;
+-	struct tasklet_struct work_task;
++	struct work_struct work_task;
+ 	wait_queue_head_t reset_wait_queue;
+ 	struct task_struct *reset_task;
+ };
+-- 
+2.17.1
+

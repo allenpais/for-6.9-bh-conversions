@@ -1,0 +1,62 @@
+From 20e3b61a4bf6abf02b2e290ce762bbd40a683bb2 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:12:17 +0000
+Subject: [PATCH 09/18] rapidio: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/rapidio/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/rapidio/devices/tsi721.h     | 2 +-
+ drivers/rapidio/devices/tsi721_dma.c | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/rapidio/devices/tsi721.h b/drivers/rapidio/devices/tsi721.h
+index 4f996ce62725..a8de69560ca6 100644
+--- a/drivers/rapidio/devices/tsi721.h
++++ b/drivers/rapidio/devices/tsi721.h
+@@ -704,7 +704,7 @@ struct tsi721_bdma_chan {
+ 	struct tsi721_tx_desc	*active_tx;
+ 	struct list_head	queue;
+ 	struct list_head	free_list;
+-	struct tasklet_struct	tasklet;
++	struct work_struct 	work;
+ 	bool			active;
+ };
+ 
+diff --git a/drivers/rapidio/devices/tsi721_dma.c b/drivers/rapidio/devices/tsi721_dma.c
+index f77f75172bdc..693473165872 100644
+--- a/drivers/rapidio/devices/tsi721_dma.c
++++ b/drivers/rapidio/devices/tsi721_dma.c
+@@ -790,7 +790,7 @@ static void tsi721_free_chan_resources(struct dma_chan *dchan)
+ 	tsi721_bdma_interrupt_enable(bdma_chan, 0);
+ 	bdma_chan->active = false;
+ 	tsi721_sync_dma_irq(bdma_chan);
+-	tasklet_kill(&bdma_chan->tasklet);
++	cancel_work_sync(&bdma_chan->tasklet);
+ 	INIT_LIST_HEAD(&bdma_chan->free_list);
+ 	kfree(bdma_chan->tx_desc);
+ 	tsi721_bdma_ch_free(bdma_chan);
+@@ -1033,7 +1033,7 @@ void tsi721_unregister_dma(struct tsi721_device *priv)
+ 			tsi721_bdma_interrupt_enable(bdma_chan, 0);
+ 			bdma_chan->active = false;
+ 			tsi721_sync_dma_irq(bdma_chan);
+-			tasklet_kill(&bdma_chan->tasklet);
++			cancel_work_sync(&bdma_chan->tasklet);
+ 			INIT_LIST_HEAD(&bdma_chan->free_list);
+ 			kfree(bdma_chan->tx_desc);
+ 			tsi721_bdma_ch_free(bdma_chan);
+-- 
+2.17.1
+

@@ -1,0 +1,933 @@
+From 9fa8951ea16401543fad99ee521d659d1aac25b6 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:20:10 +0000
+Subject: [PATCH 18/18] net: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts net/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ net/atm/pppoatm.c              | 25 ++++++++++++-----------
+ net/dccp/ccids/ccid2.c         | 11 +++++-----
+ net/dccp/timer.c               |  9 +++++----
+ net/ipv4/tcp_output.c          | 37 +++++++++++++++++-----------------
+ net/mac80211/driver-ops.c      |  4 ++--
+ net/mac80211/ieee80211_i.h     | 17 ++++++++--------
+ net/mac80211/main.c            | 17 ++++++++--------
+ net/mac80211/tdls.c            |  2 +-
+ net/mac80211/tx.c              | 11 +++++-----
+ net/mac80211/util.c            |  9 +++++----
+ net/mac802154/driver-ops.h     |  4 ++--
+ net/mac802154/ieee802154_i.h   |  3 ++-
+ net/mac802154/main.c           |  9 +++++----
+ net/rds/ib.h                   |  9 +++++----
+ net/rds/ib_cm.c                |  4 ++--
+ net/smc/smc.h                  |  3 ++-
+ net/smc/smc_cdc.c              | 15 +++++++-------
+ net/smc/smc_core.c             |  4 ++--
+ net/smc/smc_ib.h               |  5 +++--
+ net/smc/smc_wr.c               | 23 +++++++++++----------
+ net/vmw_vsock/vmci_transport.c |  4 ++--
+ 21 files changed, 120 insertions(+), 105 deletions(-)
+
+diff --git a/net/atm/pppoatm.c b/net/atm/pppoatm.c
+index 3e4f17d335fe..9e2c19a97cc5 100644
+--- a/net/atm/pppoatm.c
++++ b/net/atm/pppoatm.c
+@@ -44,6 +44,7 @@
+ #include <linux/ppp-ioctl.h>
+ #include <linux/ppp_channel.h>
+ #include <linux/atmppp.h>
++#include <linux/workqueue.h>
+ 
+ #include "common.h"
+ 
+@@ -65,7 +66,7 @@ struct pppoatm_vcc {
+ 	unsigned long blocked;
+ 	int flags;			/* SC_COMP_PROT - compress protocol */
+ 	struct ppp_channel chan;	/* interface to generic ppp layer */
+-	struct tasklet_struct wakeup_tasklet;
++	struct work_struct wakeup_work;
+ };
+ 
+ /*
+@@ -99,11 +100,11 @@ static inline struct pppoatm_vcc *chan_to_pvcc(const struct ppp_channel *chan)
+ /*
+  * We can't do this directly from our _pop handler, since the ppp code
+  * doesn't want to be called in interrupt context, so we do it from
+- * a tasklet
++ * a work
+  */
+-static void pppoatm_wakeup_sender(struct tasklet_struct *t)
++static void pppoatm_wakeup_sender(struct work_struct *t)
+ {
+-	struct pppoatm_vcc *pvcc = from_tasklet(pvcc, t, wakeup_tasklet);
++	struct pppoatm_vcc *pvcc = from_work(pvcc, t, wakeup_work);
+ 
+ 	ppp_output_wakeup(&pvcc->chan);
+ }
+@@ -122,7 +123,7 @@ static void pppoatm_release_cb(struct atm_vcc *atmvcc)
+ 	 * ->release_cb() can't be called until that's done.
+ 	 */
+ 	if (test_and_clear_bit(BLOCKED, &pvcc->blocked))
+-		tasklet_schedule(&pvcc->wakeup_tasklet);
++		queue_work(system_bh_wq, &pvcc->wakeup_work);
+ 	if (pvcc->old_release_cb)
+ 		pvcc->old_release_cb(atmvcc);
+ }
+@@ -139,14 +140,14 @@ static void pppoatm_pop(struct atm_vcc *atmvcc, struct sk_buff *skb)
+ 	atomic_dec(&pvcc->inflight);
+ 
+ 	/*
+-	 * We always used to run the wakeup tasklet unconditionally here, for
++	 * We always used to run the wakeup work unconditionally here, for
+ 	 * fear of race conditions where we clear the BLOCKED flag just as we
+ 	 * refuse another packet in pppoatm_send(). This was quite inefficient.
+ 	 *
+ 	 * In fact it's OK. The PPP core will only ever call pppoatm_send()
+ 	 * while holding the channel->downl lock. And ppp_output_wakeup() as
+-	 * called by the tasklet will *also* grab that lock. So even if another
+-	 * CPU is in pppoatm_send() right now, the tasklet isn't going to race
++	 * called by the work will *also* grab that lock. So even if another
++	 * CPU is in pppoatm_send() right now, the work isn't going to race
+ 	 * with it. The wakeup *will* happen after the other CPU is safely out
+ 	 * of pppoatm_send() again.
+ 	 *
+@@ -157,7 +158,7 @@ static void pppoatm_pop(struct atm_vcc *atmvcc, struct sk_buff *skb)
+ 	 * pppoatm_may_send() which is commented there.
+ 	 */
+ 	if (test_and_clear_bit(BLOCKED, &pvcc->blocked))
+-		tasklet_schedule(&pvcc->wakeup_tasklet);
++		queue_work(system_bh_wq, &pvcc->wakeup_work);
+ }
+ 
+ /*
+@@ -171,7 +172,7 @@ static void pppoatm_unassign_vcc(struct atm_vcc *atmvcc)
+ 	atmvcc->push = pvcc->old_push;
+ 	atmvcc->pop = pvcc->old_pop;
+ 	atmvcc->release_cb = pvcc->old_release_cb;
+-	tasklet_kill(&pvcc->wakeup_tasklet);
++	cancel_work_sync(&pvcc->wakeup_work);
+ 	ppp_unregister_channel(&pvcc->chan);
+ 	atmvcc->user_back = NULL;
+ 	kfree(pvcc);
+@@ -261,7 +262,7 @@ static int pppoatm_may_send(struct pppoatm_vcc *pvcc, int size)
+ 	 * *again*. If it did run in that window, we'll have space on
+ 	 * the queue now and can return success. It's harmless to leave
+ 	 * the BLOCKED flag set, since it's only used as a trigger to
+-	 * run the wakeup tasklet. Another wakeup will never hurt.
++	 * run the wakeup work. Another wakeup will never hurt.
+ 	 * If pppoatm_pop() is running but hasn't got as far as making
+ 	 * space on the queue yet, then it hasn't checked the BLOCKED
+ 	 * flag yet either, so we're safe in that case too. It'll issue
+@@ -413,7 +414,7 @@ static int pppoatm_assign_vcc(struct atm_vcc *atmvcc, void __user *arg)
+ 	pvcc->chan.ops = &pppoatm_ops;
+ 	pvcc->chan.mtu = atmvcc->qos.txtp.max_sdu - PPP_HDRLEN -
+ 	    (be.encaps == e_vc ? 0 : LLC_LEN);
+-	tasklet_setup(&pvcc->wakeup_tasklet, pppoatm_wakeup_sender);
++	INIT_WORK(&pvcc->wakeup_work, pppoatm_wakeup_sender);
+ 	err = ppp_register_channel(&pvcc->chan);
+ 	if (err != 0) {
+ 		kfree(pvcc);
+diff --git a/net/dccp/ccids/ccid2.c b/net/dccp/ccids/ccid2.c
+index 4d9823d6dced..d1f8f2a1bffc 100644
+--- a/net/dccp/ccids/ccid2.c
++++ b/net/dccp/ccids/ccid2.c
+@@ -11,6 +11,7 @@
+  * This implementation should follow RFC 4341
+  */
+ #include <linux/slab.h>
++#include <linux/workqueue.h>
+ #include "../feat.h"
+ #include "ccid2.h"
+ 
+@@ -114,13 +115,13 @@ static void ccid2_change_l_seq_window(struct sock *sk, u64 val)
+ 						  DCCPF_SEQ_WMAX));
+ }
+ 
+-static void dccp_tasklet_schedule(struct sock *sk)
++static void dccp_queue_work(system_bh_wq, struct sock *sk)
+ {
+-	struct tasklet_struct *t = &dccp_sk(sk)->dccps_xmitlet;
++	struct work_struct *t = &dccp_sk(sk)->dccps_xmitlet;
+ 
+ 	if (!test_and_set_bit(TASKLET_STATE_SCHED, &t->state)) {
+ 		sock_hold(sk);
+-		__tasklet_schedule(t);
++		__queue_work(system_bh_wq, t);
+ 	}
+ }
+ 
+@@ -164,7 +165,7 @@ static void ccid2_hc_tx_rto_expire(struct timer_list *t)
+ 
+ 	/* if we were blocked before, we may now send cwnd=1 packet */
+ 	if (sender_was_blocked)
+-		dccp_tasklet_schedule(sk);
++		dccp_queue_work(system_bh_wq, sk);
+ 	/* restart backed-off timer */
+ 	sk_reset_timer(sk, &hc->tx_rtotimer, jiffies + hc->tx_rto);
+ out:
+@@ -711,7 +712,7 @@ static void ccid2_hc_tx_packet_recv(struct sock *sk, struct sk_buff *skb)
+ done:
+ 	/* check if incoming Acks allow pending packets to be sent */
+ 	if (sender_was_blocked && !ccid2_cwnd_network_limited(hc))
+-		dccp_tasklet_schedule(sk);
++		dccp_queue_work(system_bh_wq, sk);
+ 	dccp_ackvec_parsed_cleanup(&hc->tx_av_chunks);
+ }
+ 
+diff --git a/net/dccp/timer.c b/net/dccp/timer.c
+index a4cfb47b60e5..64096e6bfbb6 100644
+--- a/net/dccp/timer.c
++++ b/net/dccp/timer.c
+@@ -9,6 +9,7 @@
+ #include <linux/dccp.h>
+ #include <linux/skbuff.h>
+ #include <linux/export.h>
++#include <linux/workqueue.h>
+ 
+ #include "dccp.h"
+ 
+@@ -215,13 +216,13 @@ static void dccp_delack_timer(struct timer_list *t)
+ 
+ /**
+  * dccp_write_xmitlet  -  Workhorse for CCID packet dequeueing interface
+- * @t: pointer to the tasklet associated with this handler
++ * @t: pointer to the work associated with this handler
+  *
+  * See the comments above %ccid_dequeueing_decision for supported modes.
+  */
+-static void dccp_write_xmitlet(struct tasklet_struct *t)
++static void dccp_write_xmitlet(struct work_struct *t)
+ {
+-	struct dccp_sock *dp = from_tasklet(dp, t, dccps_xmitlet);
++	struct dccp_sock *dp = from_work(dp, t, dccps_xmitlet);
+ 	struct sock *sk = &dp->dccps_inet_connection.icsk_inet.sk;
+ 
+ 	bh_lock_sock(sk);
+@@ -244,7 +245,7 @@ void dccp_init_xmit_timers(struct sock *sk)
+ {
+ 	struct dccp_sock *dp = dccp_sk(sk);
+ 
+-	tasklet_setup(&dp->dccps_xmitlet, dccp_write_xmitlet);
++	INIT_WORK(&dp->dccps_xmitlet, dccp_write_xmitlet);
+ 	timer_setup(&dp->dccps_xmit_timer, dccp_write_xmit_timer, 0);
+ 	inet_csk_init_xmit_timers(sk, &dccp_write_timer, &dccp_delack_timer,
+ 				  &dccp_keepalive_timer);
+diff --git a/net/ipv4/tcp_output.c b/net/ipv4/tcp_output.c
+index e3167ad96567..100d18f0efda 100644
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
+@@ -44,6 +44,7 @@
+ #include <linux/gfp.h>
+ #include <linux/module.h>
+ #include <linux/static_key.h>
++#include <linux/workqueue.h>
+ 
+ #include <trace/events/tcp.h>
+ 
+@@ -1049,15 +1050,15 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
+  * needs to be reallocated in a driver.
+  * The invariant being skb->truesize subtracted from sk->sk_wmem_alloc
+  *
+- * Since transmit from skb destructor is forbidden, we use a tasklet
++ * Since transmit from skb destructor is forbidden, we use a work
+  * to process all sockets that eventually need to send more skbs.
+- * We use one tasklet per cpu, with its own queue of sockets.
++ * We use one work per cpu, with its own queue of sockets.
+  */
+-struct tsq_tasklet {
+-	struct tasklet_struct	tasklet;
++struct tsq_work {
++	struct work_struct 	work;
+ 	struct list_head	head; /* queue of tcp sockets */
+ };
+-static DEFINE_PER_CPU(struct tsq_tasklet, tsq_tasklet);
++static DEFINE_PER_CPU(struct tsq_work, tsq_work);
+ 
+ static void tcp_tsq_write(struct sock *sk)
+ {
+@@ -1087,14 +1088,14 @@ static void tcp_tsq_handler(struct sock *sk)
+ 	bh_unlock_sock(sk);
+ }
+ /*
+- * One tasklet per cpu tries to send more skbs.
+- * We run in tasklet context but need to disable irqs when
++ * One work per cpu tries to send more skbs.
++ * We run in work context but need to disable irqs when
+  * transferring tsq->head because tcp_wfree() might
+  * interrupt us (non NAPI drivers)
+  */
+-static void tcp_tasklet_func(struct tasklet_struct *t)
++static void tcp_work_func(struct work_struct *t)
+ {
+-	struct tsq_tasklet *tsq = from_tasklet(tsq,  t, tasklet);
++	struct tsq_work *tsq = from_work(tsq, t, work);
+ 	LIST_HEAD(list);
+ 	unsigned long flags;
+ 	struct list_head *q, *n;
+@@ -1164,15 +1165,15 @@ void tcp_release_cb(struct sock *sk)
+ }
+ EXPORT_SYMBOL(tcp_release_cb);
+ 
+-void __init tcp_tasklet_init(void)
++void __init tcp_work_init(void)
+ {
+ 	int i;
+ 
+ 	for_each_possible_cpu(i) {
+-		struct tsq_tasklet *tsq = &per_cpu(tsq_tasklet, i);
++		struct tsq_work *tsq = &per_cpu(tsq_work, i);
+ 
+ 		INIT_LIST_HEAD(&tsq->head);
+-		tasklet_setup(&tsq->tasklet, tcp_tasklet_func);
++		INIT_WORK(&tsq->work, tcp_work_func);
+ 	}
+ }
+ 
+@@ -1186,11 +1187,11 @@ void tcp_wfree(struct sk_buff *skb)
+ 	struct sock *sk = skb->sk;
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	unsigned long flags, nval, oval;
+-	struct tsq_tasklet *tsq;
++	struct tsq_work *tsq;
+ 	bool empty;
+ 
+ 	/* Keep one reference on sk_wmem_alloc.
+-	 * Will be released by sk_free() from here or tcp_tasklet_func()
++	 * Will be released by sk_free() from here or tcp_work_func()
+ 	 */
+ 	WARN_ON(refcount_sub_and_test(skb->truesize - 1, &sk->sk_wmem_alloc));
+ 
+@@ -1212,13 +1213,13 @@ void tcp_wfree(struct sk_buff *skb)
+ 		nval = (oval & ~TSQF_THROTTLED) | TSQF_QUEUED;
+ 	} while (!try_cmpxchg(&sk->sk_tsq_flags, &oval, nval));
+ 
+-	/* queue this socket to tasklet queue */
++	/* queue this socket to work queue */
+ 	local_irq_save(flags);
+-	tsq = this_cpu_ptr(&tsq_tasklet);
++	tsq = this_cpu_ptr(&tsq_work);
+ 	empty = list_empty(&tsq->head);
+ 	list_add(&tp->tsq_node, &tsq->head);
+ 	if (empty)
+-		tasklet_schedule(&tsq->tasklet);
++		queue_work(system_bh_wq, &tsq->work);
+ 	local_irq_restore(flags);
+ 	return;
+ out:
+@@ -2623,7 +2624,7 @@ static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
+ 	if (refcount_read(&sk->sk_wmem_alloc) > limit) {
+ 		/* Always send skb if rtx queue is empty or has one skb.
+ 		 * No need to wait for TX completion to call us back,
+-		 * after softirq/tasklet schedule.
++		 * after softirq/work schedule.
+ 		 * This helps when TX completions are delayed too much.
+ 		 */
+ 		if (tcp_rtx_queue_empty_or_single_skb(sk))
+diff --git a/net/mac80211/driver-ops.c b/net/mac80211/driver-ops.c
+index 3b7f70073fc3..f784a7d5183c 100644
+--- a/net/mac80211/driver-ops.c
++++ b/net/mac80211/driver-ops.c
+@@ -46,8 +46,8 @@ void drv_stop(struct ieee80211_local *local)
+ 	trace_drv_return_void(local);
+ 
+ 	/* sync away all work on the tasklet before clearing started */
+-	tasklet_disable(&local->tasklet);
+-	tasklet_enable(&local->tasklet);
++	disable_work_sync(&local->tasklet);
++	enable_and_queue_work(system_bh_wq, &local->tasklet);
+ 
+ 	barrier();
+ 
+diff --git a/net/mac80211/ieee80211_i.h b/net/mac80211/ieee80211_i.h
+index 0b2b53550bd9..fdcab5f9a076 100644
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -26,6 +26,7 @@
+ #include <linux/idr.h>
+ #include <linux/rhashtable.h>
+ #include <linux/rbtree.h>
++#include <linux/workqueue.h>
+ #include <net/ieee80211_radiotap.h>
+ #include <net/cfg80211.h>
+ #include <net/mac80211.h>
+@@ -621,8 +622,8 @@ struct ieee80211_if_ibss {
+ /**
+  * struct ieee80211_if_ocb - OCB mode state
+  *
+- * @housekeeping_timer: timer for periodic invocation of a housekeeping task
+- * @wrkq_flags: OCB deferred task action
++ * @housekeeping_timer: timer for periodic invocation of a housekeeping work
++ * @wrkq_flags: OCB deferred work action
+  * @incomplete_lock: delayed STA insertion lock
+  * @incomplete_stations: list of STAs waiting for delayed insertion
+  * @joined: indication if the interface is connected to an OCB network
+@@ -1390,12 +1391,12 @@ struct ieee80211_local {
+ 
+ 	int tx_headroom; /* required headroom for hardware/radiotap */
+ 
+-	/* Tasklet and skb queue to process calls from IRQ mode. All frames
++	/* Work and skb queue to process calls from IRQ mode. All frames
+ 	 * added to skb_queue will be processed, but frames in
+ 	 * skb_queue_unreliable may be dropped if the total length of these
+ 	 * queues increases over the limit. */
+ #define IEEE80211_IRQSAFE_QUEUE_LIMIT 128
+-	struct tasklet_struct tasklet;
++	struct work_struct work;
+ 	struct sk_buff_head skb_queue;
+ 	struct sk_buff_head skb_queue_unreliable;
+ 
+@@ -1415,8 +1416,8 @@ struct ieee80211_local {
+ 	int sta_generation;
+ 
+ 	struct sk_buff_head pending[IEEE80211_MAX_QUEUES];
+-	struct tasklet_struct tx_pending_tasklet;
+-	struct tasklet_struct wake_txqs_tasklet;
++	struct work_struct tx_pending_work;
++	struct work_struct wake_txqs_work;
+ 
+ 	atomic_t agg_queue_stop[IEEE80211_MAX_QUEUES];
+ 
+@@ -2011,7 +2012,7 @@ static inline void ieee80211_vif_clear_links(struct ieee80211_sub_if_data *sdata
+ 
+ /* tx handling */
+ void ieee80211_clear_tx_pending(struct ieee80211_local *local);
+-void ieee80211_tx_pending(struct tasklet_struct *t);
++void ieee80211_tx_pending(struct work_struct *t);
+ netdev_tx_t ieee80211_monitor_start_xmit(struct sk_buff *skb,
+ 					 struct net_device *dev);
+ netdev_tx_t ieee80211_subif_start_xmit(struct sk_buff *skb,
+@@ -2398,7 +2399,7 @@ void ieee80211_txq_remove_vlan(struct ieee80211_local *local,
+ 			       struct ieee80211_sub_if_data *sdata);
+ void ieee80211_fill_txq_stats(struct cfg80211_txq_stats *txqstats,
+ 			      struct txq_info *txqi);
+-void ieee80211_wake_txqs(struct tasklet_struct *t);
++void ieee80211_wake_txqs(struct work_struct *t);
+ void ieee80211_send_auth(struct ieee80211_sub_if_data *sdata,
+ 			 u16 transaction, u16 auth_alg, u16 status,
+ 			 const u8 *extra, size_t extra_len, const u8 *bssid,
+diff --git a/net/mac80211/main.c b/net/mac80211/main.c
+index f2ece7793573..63146df1a39b 100644
+--- a/net/mac80211/main.c
++++ b/net/mac80211/main.c
+@@ -21,6 +21,7 @@
+ #include <linux/rtnetlink.h>
+ #include <linux/bitmap.h>
+ #include <linux/inetdevice.h>
++#include <linux/workqueue.h>
+ #include <net/net_namespace.h>
+ #include <net/dropreason.h>
+ #include <net/cfg80211.h>
+@@ -303,9 +304,9 @@ u64 ieee80211_reset_erp_info(struct ieee80211_sub_if_data *sdata)
+ 	       BSS_CHANGED_ERP_SLOT;
+ }
+ 
+-static void ieee80211_tasklet_handler(struct tasklet_struct *t)
++static void ieee80211_work_handler(struct work_struct *t)
+ {
+-	struct ieee80211_local *local = from_tasklet(local, t, tasklet);
++	struct ieee80211_local *local = from_work(local, t, work);
+ 	struct sk_buff *skb;
+ 
+ 	while ((skb = skb_dequeue(&local->skb_queue)) ||
+@@ -847,9 +848,9 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len,
+ 		skb_queue_head_init(&local->pending[i]);
+ 		atomic_set(&local->agg_queue_stop[i], 0);
+ 	}
+-	tasklet_setup(&local->tx_pending_tasklet, ieee80211_tx_pending);
+-	tasklet_setup(&local->wake_txqs_tasklet, ieee80211_wake_txqs);
+-	tasklet_setup(&local->tasklet, ieee80211_tasklet_handler);
++	INIT_WORK(&local->tx_pending_work, ieee80211_tx_pending);
++	INIT_WORK(&local->wake_txqs_work, ieee80211_wake_txqs);
++	INIT_WORK(&local->work, ieee80211_work_handler);
+ 
+ 	skb_queue_head_init(&local->skb_queue);
+ 	skb_queue_head_init(&local->skb_queue_unreliable);
+@@ -1475,8 +1476,8 @@ void ieee80211_unregister_hw(struct ieee80211_hw *hw)
+ {
+ 	struct ieee80211_local *local = hw_to_local(hw);
+ 
+-	tasklet_kill(&local->tx_pending_tasklet);
+-	tasklet_kill(&local->tasklet);
++	cancel_work_sync(&local->tx_pending_work);
++	cancel_work_sync(&local->work);
+ 
+ #ifdef CONFIG_INET
+ 	unregister_inetaddr_notifier(&local->ifa_notifier);
+@@ -1490,7 +1491,7 @@ void ieee80211_unregister_hw(struct ieee80211_hw *hw)
+ 	/*
+ 	 * At this point, interface list manipulations are fine
+ 	 * because the driver cannot be handing us frames any
+-	 * more and the tasklet is killed.
++	 * more and the work is killed.
+ 	 */
+ 	ieee80211_remove_interfaces(local);
+ 
+diff --git a/net/mac80211/tdls.c b/net/mac80211/tdls.c
+index 49730b424141..a1de8e90f7c0 100644
+--- a/net/mac80211/tdls.c
++++ b/net/mac80211/tdls.c
+@@ -1497,7 +1497,7 @@ int ieee80211_tdls_oper(struct wiphy *wiphy, struct net_device *dev,
+ 		 * Note that this only forces the tasklet to flush pendings -
+ 		 * not to stop the tasklet from rescheduling itself.
+ 		 */
+-		tasklet_kill(&local->tx_pending_tasklet);
++		cancel_work_sync(&local->tx_pending_tasklet);
+ 		/* flush a potentially queued teardown packet */
+ 		ieee80211_flush_queues(local, sdata, false);
+ 
+diff --git a/net/mac80211/tx.c b/net/mac80211/tx.c
+index 314998fdb1a5..a761b4fc5505 100644
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -18,6 +18,7 @@
+ #include <linux/bitmap.h>
+ #include <linux/rcupdate.h>
+ #include <linux/export.h>
++#include <linux/workqueue.h>
+ #include <net/net_namespace.h>
+ #include <net/ieee80211_radiotap.h>
+ #include <net/cfg80211.h>
+@@ -1711,7 +1712,7 @@ static bool ieee80211_tx_frags(struct ieee80211_local *local,
+ 				/*
+ 				 * Since queue is stopped, queue up frames for
+ 				 * later transmission from the tx-pending
+-				 * tasklet when the queue is woken again.
++				 * work when the queue is woken again.
+ 				 */
+ 				if (txpending)
+ 					skb_queue_splice_init(skbs,
+@@ -4827,12 +4828,12 @@ static bool ieee80211_tx_pending_skb(struct ieee80211_local *local,
+ }
+ 
+ /*
+- * Transmit all pending packets. Called from tasklet.
++ * Transmit all pending packets. Called from work.
+  */
+ void ieee80211_tx_pending(struct tasklet_struct *t)
+ {
+-	struct ieee80211_local *local = from_tasklet(local, t,
+-						     tx_pending_tasklet);
++	struct ieee80211_local *local = from_work(local, t,
++						     tx_pending_work);
+ 	unsigned long flags;
+ 	int i;
+ 	bool txok;
+@@ -6065,7 +6066,7 @@ void __ieee80211_tx_skb_tid_band(struct ieee80211_sub_if_data *sdata,
+ 		u32_encode_bits(link, IEEE80211_TX_CTRL_MLO_LINK);
+ 
+ 	/*
+-	 * The other path calling ieee80211_xmit is from the tasklet,
++	 * The other path calling ieee80211_xmit is from the work,
+ 	 * and while we can handle concurrent transmissions locking
+ 	 * requirements are that we do not come into tx with bhs on.
+ 	 */
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+index 643c54855be6..22df1b446e65 100644
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -21,6 +21,7 @@
+ #include <linux/if_arp.h>
+ #include <linux/bitmap.h>
+ #include <linux/crc32.h>
++#include <linux/workqueue.h>
+ #include <net/net_namespace.h>
+ #include <net/cfg80211.h>
+ #include <net/rtnetlink.h>
+@@ -416,8 +417,8 @@ _ieee80211_wake_txqs(struct ieee80211_local *local, unsigned long *flags)
+ 
+ void ieee80211_wake_txqs(struct tasklet_struct *t)
+ {
+-	struct ieee80211_local *local = from_tasklet(local, t,
+-						     wake_txqs_tasklet);
++	struct ieee80211_local *local = from_work(local, t,
++						     wake_txqs_work);
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&local->queue_stop_reason_lock, flags);
+@@ -456,7 +457,7 @@ static void __ieee80211_wake_queue(struct ieee80211_hw *hw, int queue,
+ 		return;
+ 
+ 	if (!skb_queue_empty(&local->pending[queue]))
+-		tasklet_schedule(&local->tx_pending_tasklet);
++		queue_work(system_bh_wq, &local->tx_pending_work);
+ 
+ 	/*
+ 	 * Calling _ieee80211_wake_txqs here can be a problem because it may
+@@ -466,7 +467,7 @@ static void __ieee80211_wake_queue(struct ieee80211_hw *hw, int queue,
+ 	 * __ieee80211_wake_queue call it right before releasing the lock.
+ 	 */
+ 	if (reason == IEEE80211_QUEUE_STOP_REASON_DRIVER)
+-		tasklet_schedule(&local->wake_txqs_tasklet);
++		queue_work(system_bh_wq, &local->wake_txqs_work);
+ 	else
+ 		_ieee80211_wake_txqs(local, flags);
+ }
+diff --git a/net/mac802154/driver-ops.h b/net/mac802154/driver-ops.h
+index a7af3f0ddb3e..aa36d8fd9fdb 100644
+--- a/net/mac802154/driver-ops.h
++++ b/net/mac802154/driver-ops.h
+@@ -221,8 +221,8 @@ static inline void drv_stop(struct ieee802154_local *local)
+ 	trace_802154_drv_return_void(local);
+ 
+ 	/* sync away all work on the tasklet before clearing started */
+-	tasklet_disable(&local->tasklet);
+-	tasklet_enable(&local->tasklet);
++	disable_work_sync(&local->tasklet);
++	enable_and_queue_work(system_bh_wq, &local->tasklet);
+ 
+ 	barrier();
+ 
+diff --git a/net/mac802154/ieee802154_i.h b/net/mac802154/ieee802154_i.h
+index 08dd521a51a5..23477e054d27 100644
+--- a/net/mac802154/ieee802154_i.h
++++ b/net/mac802154/ieee802154_i.h
+@@ -14,6 +14,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/mutex.h>
+ #include <linux/hrtimer.h>
++#include <linux/workqueue.h>
+ #include <net/cfg802154.h>
+ #include <net/mac802154.h>
+ #include <net/nl802154.h>
+@@ -86,7 +87,7 @@ struct ieee802154_local {
+ 	bool suspended;
+ 	unsigned long ongoing;
+ 
+-	struct tasklet_struct tasklet;
++	struct work_struct work;
+ 	struct sk_buff_head skb_queue;
+ 
+ 	struct sk_buff *tx_skb;
+diff --git a/net/mac802154/main.c b/net/mac802154/main.c
+index 9ab7396668d2..7c6df0753838 100644
+--- a/net/mac802154/main.c
++++ b/net/mac802154/main.c
+@@ -9,6 +9,7 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/netdevice.h>
++#include <linux/workqueue.h>
+ 
+ #include <net/netlink.h>
+ #include <net/nl802154.h>
+@@ -20,9 +21,9 @@
+ #include "ieee802154_i.h"
+ #include "cfg.h"
+ 
+-static void ieee802154_tasklet_handler(struct tasklet_struct *t)
++static void ieee802154_work_handler(struct work_struct *t)
+ {
+-	struct ieee802154_local *local = from_tasklet(local, t, tasklet);
++	struct ieee802154_local *local = from_work(local, t, work);
+ 	struct sk_buff *skb;
+ 
+ 	while ((skb = skb_dequeue(&local->skb_queue))) {
+@@ -93,7 +94,7 @@ ieee802154_alloc_hw(size_t priv_data_len, const struct ieee802154_ops *ops)
+ 	INIT_LIST_HEAD(&local->rx_mac_cmd_list);
+ 	mutex_init(&local->iflist_mtx);
+ 
+-	tasklet_setup(&local->tasklet, ieee802154_tasklet_handler);
++	INIT_WORK(&local->work, ieee802154_work_handler);
+ 
+ 	skb_queue_head_init(&local->skb_queue);
+ 
+@@ -272,7 +273,7 @@ void ieee802154_unregister_hw(struct ieee802154_hw *hw)
+ {
+ 	struct ieee802154_local *local = hw_to_local(hw);
+ 
+-	tasklet_kill(&local->tasklet);
++	cancel_work_sync(&local->work);
+ 	flush_workqueue(local->workqueue);
+ 
+ 	rtnl_lock();
+diff --git a/net/rds/ib.h b/net/rds/ib.h
+index 2ba71102b1f1..ee0c6560d310 100644
+--- a/net/rds/ib.h
++++ b/net/rds/ib.h
+@@ -7,6 +7,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/pci.h>
+ #include <linux/slab.h>
++#include <linux/workqueue.h>
+ #include "rds.h"
+ #include "rdma_transport.h"
+ 
+@@ -159,8 +160,8 @@ struct rds_ib_connection {
+ 	atomic_t		i_fastreg_inuse_count;
+ 
+ 	/* interrupt handling */
+-	struct tasklet_struct	i_send_tasklet;
+-	struct tasklet_struct	i_recv_tasklet;
++	struct work_struct 	i_send_work;
++	struct work_struct 	i_recv_work;
+ 
+ 	/* tx */
+ 	struct rds_ib_work_ring	i_send_ring;
+@@ -276,7 +277,7 @@ struct rds_ib_statistics {
+ 	uint64_t	s_ib_connect_raced;
+ 	uint64_t	s_ib_listen_closed_stale;
+ 	uint64_t	s_ib_evt_handler_call;
+-	uint64_t	s_ib_tasklet_call;
++	uint64_t	s_ib_work_call;
+ 	uint64_t	s_ib_tx_cq_event;
+ 	uint64_t	s_ib_tx_ring_full;
+ 	uint64_t	s_ib_tx_throttle;
+@@ -402,7 +403,7 @@ void rds_ib_inc_free(struct rds_incoming *inc);
+ int rds_ib_inc_copy_to_user(struct rds_incoming *inc, struct iov_iter *to);
+ void rds_ib_recv_cqe_handler(struct rds_ib_connection *ic, struct ib_wc *wc,
+ 			     struct rds_ib_ack_state *state);
+-void rds_ib_recv_tasklet_fn(unsigned long data);
++void rds_ib_recv_work_fn(unsigned long data);
+ void rds_ib_recv_init_ring(struct rds_ib_connection *ic);
+ void rds_ib_recv_clear_ring(struct rds_ib_connection *ic);
+ void rds_ib_recv_init_ack(struct rds_ib_connection *ic);
+diff --git a/net/rds/ib_cm.c b/net/rds/ib_cm.c
+index 26b069e1999d..5f3a37b2c587 100644
+--- a/net/rds/ib_cm.c
++++ b/net/rds/ib_cm.c
+@@ -1083,8 +1083,8 @@ void rds_ib_conn_path_shutdown(struct rds_conn_path *cp)
+ 			   (atomic_read(&ic->i_signaled_sends) == 0) &&
+ 			   (atomic_read(&ic->i_fastreg_inuse_count) == 0) &&
+ 			   (atomic_read(&ic->i_fastreg_wrs) == RDS_IB_DEFAULT_FR_WR));
+-		tasklet_kill(&ic->i_send_tasklet);
+-		tasklet_kill(&ic->i_recv_tasklet);
++		cancel_work_sync(&ic->i_send_tasklet);
++		cancel_work_sync(&ic->i_recv_tasklet);
+ 
+ 		atomic_set(&ic->i_cq_quiesce, 1);
+ 
+diff --git a/net/smc/smc.h b/net/smc/smc.h
+index df64efd2dee8..8716302f8d83 100644
+--- a/net/smc/smc.h
++++ b/net/smc/smc.h
+@@ -14,6 +14,7 @@
+ #include <linux/socket.h>
+ #include <linux/types.h>
+ #include <linux/compiler.h> /* __aligned */
++#include <linux/workqueue.h>
+ #include <net/genetlink.h>
+ #include <net/sock.h>
+ 
+@@ -234,7 +235,7 @@ struct smc_connection {
+ #endif
+ 	struct work_struct	close_work;	/* peer sent some closing */
+ 	struct work_struct	abort_work;	/* abort the connection */
+-	struct tasklet_struct	rx_tsklet;	/* Receiver tasklet for SMC-D */
++	struct work_struct 	rx_tsklet;	/* Receiver work for SMC-D */
+ 	u8			rx_off;		/* receive offset:
+ 						 * 0 for SMC-R, 32 for SMC-D
+ 						 */
+diff --git a/net/smc/smc_cdc.c b/net/smc/smc_cdc.c
+index 3c06625ceb20..f2274d71c761 100644
+--- a/net/smc/smc_cdc.c
++++ b/net/smc/smc_cdc.c
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <linux/spinlock.h>
++#include <linux/workqueue.h>
+ 
+ #include "smc.h"
+ #include "smc_wr.h"
+@@ -391,7 +392,7 @@ static void smc_cdc_msg_recv_action(struct smc_sock *smc,
+ 	}
+ }
+ 
+-/* called under tasklet context */
++/* called under work context */
+ static void smc_cdc_msg_recv(struct smc_sock *smc, struct smc_cdc_msg *cdc)
+ {
+ 	sock_hold(&smc->sk);
+@@ -401,15 +402,15 @@ static void smc_cdc_msg_recv(struct smc_sock *smc, struct smc_cdc_msg *cdc)
+ 	sock_put(&smc->sk); /* no free sk in softirq-context */
+ }
+ 
+-/* Schedule a tasklet for this connection. Triggered from the ISM device IRQ
++/* Schedule a work for this connection. Triggered from the ISM device IRQ
+  * handler to indicate update in the DMBE.
+  *
+  * Context:
+- * - tasklet context
++ * - work context
+  */
+-static void smcd_cdc_rx_tsklet(struct tasklet_struct *t)
++static void smcd_cdc_rx_tsklet(struct work_struct *t)
+ {
+-	struct smc_connection *conn = from_tasklet(conn, t, rx_tsklet);
++	struct smc_connection *conn = from_work(conn, t, rx_tsklet);
+ 	struct smcd_cdc_msg *data_cdc;
+ 	struct smcd_cdc_msg cdc;
+ 	struct smc_sock *smc;
+@@ -424,12 +425,12 @@ static void smcd_cdc_rx_tsklet(struct tasklet_struct *t)
+ 	smc_cdc_msg_recv(smc, (struct smc_cdc_msg *)&cdc);
+ }
+ 
+-/* Initialize receive tasklet. Called from ISM device IRQ handler to start
++/* Initialize receive work. Called from ISM device IRQ handler to start
+  * receiver side.
+  */
+ void smcd_cdc_rx_init(struct smc_connection *conn)
+ {
+-	tasklet_setup(&conn->rx_tsklet, smcd_cdc_rx_tsklet);
++	INIT_WORK(&conn->rx_tsklet, smcd_cdc_rx_tsklet);
+ }
+ 
+ /***************************** init, exit, misc ******************************/
+diff --git a/net/smc/smc_core.c b/net/smc/smc_core.c
+index 95cc95458e2d..66957e628d32 100644
+--- a/net/smc/smc_core.c
++++ b/net/smc/smc_core.c
+@@ -1192,7 +1192,7 @@ void smc_conn_free(struct smc_connection *conn)
+ 	if (lgr->is_smcd) {
+ 		if (!list_empty(&lgr->list))
+ 			smc_ism_unset_conn(conn);
+-		tasklet_kill(&conn->rx_tsklet);
++		cancel_work_sync(&conn->rx_tsklet);
+ 	} else {
+ 		smc_cdc_wait_pend_tx_wr(conn);
+ 		if (current_work() != &conn->abort_work)
+@@ -1446,7 +1446,7 @@ static void smc_conn_kill(struct smc_connection *conn, bool soft)
+ 	if (conn->lgr->is_smcd) {
+ 		smc_ism_unset_conn(conn);
+ 		if (soft)
+-			tasklet_kill(&conn->rx_tsklet);
++			cancel_work_sync(&conn->rx_tsklet);
+ 		else
+ 			tasklet_unlock_wait(&conn->rx_tsklet);
+ 	} else {
+diff --git a/net/smc/smc_ib.h b/net/smc/smc_ib.h
+index ef8ac2b7546d..c941ce7daf35 100644
+--- a/net/smc/smc_ib.h
++++ b/net/smc/smc_ib.h
+@@ -16,6 +16,7 @@
+ #include <linux/if_ether.h>
+ #include <linux/mutex.h>
+ #include <linux/wait.h>
++#include <linux/workqueue.h>
+ #include <rdma/ib_verbs.h>
+ #include <net/smc.h>
+ 
+@@ -39,8 +40,8 @@ struct smc_ib_device {				/* ib-device infos for smc */
+ 	struct ib_event_handler	event_handler;	/* global ib_event handler */
+ 	struct ib_cq		*roce_cq_send;	/* send completion queue */
+ 	struct ib_cq		*roce_cq_recv;	/* recv completion queue */
+-	struct tasklet_struct	send_tasklet;	/* called by send cq handler */
+-	struct tasklet_struct	recv_tasklet;	/* called by recv cq handler */
++	struct work_struct 	send_work;	/* called by send cq handler */
++	struct work_struct 	recv_work;	/* called by recv cq handler */
+ 	char			mac[SMC_MAX_PORTS][ETH_ALEN];
+ 						/* mac address per port*/
+ 	u8			pnetid[SMC_MAX_PORTS][SMC_MAX_PNETID_LEN];
+diff --git a/net/smc/smc_wr.c b/net/smc/smc_wr.c
+index 0021065a600a..92c4552964ba 100644
+--- a/net/smc/smc_wr.c
++++ b/net/smc/smc_wr.c
+@@ -12,7 +12,7 @@
+  * Through a send or receive completion queue (CQ) respectively,
+  * we get completion queue entries (CQEs) [aka work completions (WCs)].
+  * Since the CQ callback is called from IRQ context, we split work by using
+- * bottom halves implemented by tasklets.
++ * bottom halves implemented by works.
+  *
+  * SMC uses this to exchange LLC (link layer control)
+  * and CDC (connection data control) messages.
+@@ -25,6 +25,7 @@
+ #include <linux/atomic.h>
+ #include <linux/hashtable.h>
+ #include <linux/wait.h>
++#include <linux/workqueue.h>
+ #include <rdma/ib_verbs.h>
+ #include <asm/div64.h>
+ 
+@@ -133,9 +134,9 @@ static inline void smc_wr_tx_process_cqe(struct ib_wc *wc)
+ 	wake_up(&link->wr_tx_wait);
+ }
+ 
+-static void smc_wr_tx_tasklet_fn(struct tasklet_struct *t)
++static void smc_wr_tx_work_fn(struct work_struct *t)
+ {
+-	struct smc_ib_device *dev = from_tasklet(dev, t, send_tasklet);
++	struct smc_ib_device *dev = from_work(dev, t, send_work);
+ 	struct ib_wc wc[SMC_WR_MAX_POLL_CQE];
+ 	int i = 0, rc;
+ 	int polled = 0;
+@@ -163,7 +164,7 @@ void smc_wr_tx_cq_handler(struct ib_cq *ib_cq, void *cq_context)
+ {
+ 	struct smc_ib_device *dev = (struct smc_ib_device *)cq_context;
+ 
+-	tasklet_schedule(&dev->send_tasklet);
++	queue_work(system_bh_wq, &dev->send_work);
+ }
+ 
+ /*---------------------------- request submission ---------------------------*/
+@@ -476,9 +477,9 @@ static inline void smc_wr_rx_process_cqes(struct ib_wc wc[], int num)
+ 	}
+ }
+ 
+-static void smc_wr_rx_tasklet_fn(struct tasklet_struct *t)
++static void smc_wr_rx_work_fn(struct work_struct *t)
+ {
+-	struct smc_ib_device *dev = from_tasklet(dev, t, recv_tasklet);
++	struct smc_ib_device *dev = from_work(dev, t, recv_work);
+ 	struct ib_wc wc[SMC_WR_MAX_POLL_CQE];
+ 	int polled = 0;
+ 	int rc;
+@@ -505,7 +506,7 @@ void smc_wr_rx_cq_handler(struct ib_cq *ib_cq, void *cq_context)
+ {
+ 	struct smc_ib_device *dev = (struct smc_ib_device *)cq_context;
+ 
+-	tasklet_schedule(&dev->recv_tasklet);
++	queue_work(system_bh_wq, &dev->recv_work);
+ }
+ 
+ int smc_wr_rx_post_init(struct smc_link *link)
+@@ -838,14 +839,14 @@ int smc_wr_alloc_link_mem(struct smc_link *link)
+ 
+ void smc_wr_remove_dev(struct smc_ib_device *smcibdev)
+ {
+-	tasklet_kill(&smcibdev->recv_tasklet);
+-	tasklet_kill(&smcibdev->send_tasklet);
++	cancel_work_sync(&smcibdev->recv_work);
++	cancel_work_sync(&smcibdev->send_work);
+ }
+ 
+ void smc_wr_add_dev(struct smc_ib_device *smcibdev)
+ {
+-	tasklet_setup(&smcibdev->recv_tasklet, smc_wr_rx_tasklet_fn);
+-	tasklet_setup(&smcibdev->send_tasklet, smc_wr_tx_tasklet_fn);
++	INIT_WORK(&smcibdev->recv_work, smc_wr_rx_work_fn);
++	INIT_WORK(&smcibdev->send_work, smc_wr_tx_work_fn);
+ }
+ 
+ static void smcr_wr_tx_refs_free(struct percpu_ref *ref)
+diff --git a/net/vmw_vsock/vmci_transport.c b/net/vmw_vsock/vmci_transport.c
+index b370070194fa..302f578c8d0e 100644
+--- a/net/vmw_vsock/vmci_transport.c
++++ b/net/vmw_vsock/vmci_transport.c
+@@ -237,8 +237,8 @@ vmci_transport_send_control_pkt_bh(struct sockaddr_vm *src,
+ 				   struct vmci_handle handle)
+ {
+ 	/* Note that it is safe to use a single packet across all CPUs since
+-	 * two tasklets of the same type are guaranteed to not ever run
+-	 * simultaneously. If that ever changes, or VMCI stops using tasklets,
++	 * two works of the same type are guaranteed to not ever run
++	 * simultaneously. If that ever changes, or VMCI stops using works,
+ 	 * we can use per-cpu packets.
+ 	 */
+ 	static struct vmci_transport_packet pkt;
+-- 
+2.17.1
+

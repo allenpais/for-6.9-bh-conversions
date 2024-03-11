@@ -1,0 +1,224 @@
+From 7d7ebdafa6d723a30f02960ea8a37bcb6aa4f225 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:15:12 +0000
+Subject: [PATCH 13/18] firewire: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/firewire/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/firewire/ohci.c | 49 +++++++++++++++++++++--------------------
+ 1 file changed, 25 insertions(+), 24 deletions(-)
+
+diff --git a/drivers/firewire/ohci.c b/drivers/firewire/ohci.c
+index 9db9290c3269..76059f3096ad 100644
+--- a/drivers/firewire/ohci.c
++++ b/drivers/firewire/ohci.c
+@@ -30,6 +30,7 @@
+ #include <linux/time.h>
+ #include <linux/vmalloc.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ 
+ #include <asm/byteorder.h>
+ #include <asm/page.h>
+@@ -93,7 +94,7 @@ struct ar_context {
+ 	void *pointer;
+ 	unsigned int last_buffer_index;
+ 	u32 regs;
+-	struct tasklet_struct tasklet;
++	struct work_struct work;
+ };
+ 
+ struct context;
+@@ -150,7 +151,7 @@ struct context {
+ 
+ 	descriptor_callback_t callback;
+ 
+-	struct tasklet_struct tasklet;
++	struct work_struct work;
+ };
+ 
+ #define IT_HEADER_SY(v)          ((v) <<  0)
+@@ -968,7 +969,7 @@ static void ar_recycle_buffers(struct ar_context *ctx, unsigned int end_buffer)
+ 	}
+ }
+ 
+-static void ar_context_tasklet(unsigned long data)
++static void ar_context_work(unsigned long data)
+ {
+ 	struct ar_context *ctx = (struct ar_context *)data;
+ 	unsigned int end_buffer_index, end_buffer_offset;
+@@ -1025,7 +1026,7 @@ static int ar_context_init(struct ar_context *ctx, struct fw_ohci *ohci,
+ 
+ 	ctx->regs        = regs;
+ 	ctx->ohci        = ohci;
+-	tasklet_init(&ctx->tasklet, ar_context_tasklet, (unsigned long)ctx);
++	tasklet_init(&ctx->work, ar_context_work, (unsigned long)ctx);
+ 
+ 	for (i = 0; i < AR_BUFFERS; i++) {
+ 		ctx->pages[i] = dma_alloc_pages(dev, PAGE_SIZE, &dma_addr,
+@@ -1093,7 +1094,7 @@ static struct descriptor *find_branch_descriptor(struct descriptor *d, int z)
+ 		return d + z - 1;
+ }
+ 
+-static void context_tasklet(unsigned long data)
++static void context_work(unsigned long data)
+ {
+ 	struct context *ctx = (struct context *) data;
+ 	struct descriptor *d, *last;
+@@ -1188,7 +1189,7 @@ static int context_init(struct context *ctx, struct fw_ohci *ohci,
+ 	ctx->buffer_tail = list_entry(ctx->buffer_list.next,
+ 			struct descriptor_buffer, list);
+ 
+-	tasklet_init(&ctx->tasklet, context_tasklet, (unsigned long)ctx);
++	tasklet_init(&ctx->work, context_work, (unsigned long)ctx);
+ 	ctx->callback = callback;
+ 
+ 	/*
+@@ -1460,13 +1461,13 @@ static int at_context_queue_packet(struct context *ctx,
+ 
+ static void at_context_flush(struct context *ctx)
+ {
+-	tasklet_disable(&ctx->tasklet);
++	disable_work_sync(&ctx->work);
+ 
+ 	ctx->flushing = true;
+-	context_tasklet((unsigned long)ctx);
++	context_work((unsigned long)ctx);
+ 	ctx->flushing = false;
+ 
+-	tasklet_enable(&ctx->tasklet);
++	enable_and_queue_work(system_bh_wq, &ctx->work);
+ }
+ 
+ static int handle_at_packet(struct context *context,
+@@ -2136,16 +2137,16 @@ static irqreturn_t irq_handler(int irq, void *data)
+ 		queue_work(selfid_workqueue, &ohci->bus_reset_work);
+ 
+ 	if (event & OHCI1394_RQPkt)
+-		tasklet_schedule(&ohci->ar_request_ctx.tasklet);
++		queue_work(system_bh_wq, &ohci->ar_request_ctx.work);
+ 
+ 	if (event & OHCI1394_RSPkt)
+-		tasklet_schedule(&ohci->ar_response_ctx.tasklet);
++		queue_work(system_bh_wq, &ohci->ar_response_ctx.work);
+ 
+ 	if (event & OHCI1394_reqTxComplete)
+-		tasklet_schedule(&ohci->at_request_ctx.tasklet);
++		queue_work(system_bh_wq, &ohci->at_request_ctx.work);
+ 
+ 	if (event & OHCI1394_respTxComplete)
+-		tasklet_schedule(&ohci->at_response_ctx.tasklet);
++		queue_work(system_bh_wq, &ohci->at_response_ctx.work);
+ 
+ 	if (event & OHCI1394_isochRx) {
+ 		iso_event = reg_read(ohci, OHCI1394_IsoRecvIntEventClear);
+@@ -2154,7 +2155,7 @@ static irqreturn_t irq_handler(int irq, void *data)
+ 		while (iso_event) {
+ 			i = ffs(iso_event) - 1;
+ 			tasklet_schedule(
+-				&ohci->ir_context_list[i].context.tasklet);
++				&ohci->ir_context_list[i].context.work);
+ 			iso_event &= ~(1 << i);
+ 		}
+ 	}
+@@ -2166,7 +2167,7 @@ static irqreturn_t irq_handler(int irq, void *data)
+ 		while (iso_event) {
+ 			i = ffs(iso_event) - 1;
+ 			tasklet_schedule(
+-				&ohci->it_context_list[i].context.tasklet);
++				&ohci->it_context_list[i].context.work);
+ 			iso_event &= ~(1 << i);
+ 		}
+ 	}
+@@ -2431,7 +2432,7 @@ static int ohci_enable(struct fw_card *card,
+ 	 * They shouldn't do that in this initial case where the link
+ 	 * isn't enabled.  This means we have to use the same
+ 	 * workaround here, setting the bus header to 0 and then write
+-	 * the right values in the bus reset tasklet.
++	 * the right values in the bus reset work.
+ 	 */
+ 
+ 	if (config_rom) {
+@@ -2521,7 +2522,7 @@ static int ohci_set_config_rom(struct fw_card *card,
+ 	 * during the atomic update, even on litte endian
+ 	 * architectures.  The workaround we use is to put a 0 in the
+ 	 * header quadlet; 0 is endian agnostic and means that the
+-	 * config rom isn't ready yet.  In the bus reset tasklet we
++	 * config rom isn't ready yet.  In the bus reset work we
+ 	 * then set up the real values for the two registers.
+ 	 *
+ 	 * We use ohci->lock to avoid racing with the code that sets
+@@ -2570,7 +2571,7 @@ static int ohci_set_config_rom(struct fw_card *card,
+ 	/*
+ 	 * Now initiate a bus reset to have the changes take
+ 	 * effect. We clean up the old config rom memory and DMA
+-	 * mappings in the bus reset tasklet, since the OHCI
++	 * mappings in the bus reset work, since the OHCI
+ 	 * controller could need to access it before the bus reset
+ 	 * takes effect.
+ 	 */
+@@ -2601,7 +2602,7 @@ static int ohci_cancel_packet(struct fw_card *card, struct fw_packet *packet)
+ 	struct driver_data *driver_data = packet->driver_data;
+ 	int ret = -ENOENT;
+ 
+-	tasklet_disable_in_atomic(&ctx->tasklet);
++	tasklet_disable_in_atomic(&ctx->work);
+ 
+ 	if (packet->ack != 0)
+ 		goto out;
+@@ -2620,7 +2621,7 @@ static int ohci_cancel_packet(struct fw_card *card, struct fw_packet *packet)
+ 	packet->callback(packet, &ohci->card, packet->ack);
+ 	ret = 0;
+  out:
+-	tasklet_enable(&ctx->tasklet);
++	enable_and_queue_work(system_bh_wq, &ctx->work);
+ 
+ 	return ret;
+ }
+@@ -3153,7 +3154,7 @@ static int ohci_stop_iso(struct fw_iso_context *base)
+ 	}
+ 	flush_writes(ohci);
+ 	context_stop(&ctx->context);
+-	tasklet_kill(&ctx->context.tasklet);
++	cancel_work_sync(&ctx->context.work);
+ 
+ 	return 0;
+ }
+@@ -3525,10 +3526,10 @@ static int ohci_flush_iso_completions(struct fw_iso_context *base)
+ 	struct iso_context *ctx = container_of(base, struct iso_context, base);
+ 	int ret = 0;
+ 
+-	tasklet_disable_in_atomic(&ctx->context.tasklet);
++	tasklet_disable_in_atomic(&ctx->context.work);
+ 
+ 	if (!test_and_set_bit_lock(0, &ctx->flushing_completions)) {
+-		context_tasklet((unsigned long)&ctx->context);
++		context_work((unsigned long)&ctx->context);
+ 
+ 		switch (base->type) {
+ 		case FW_ISO_CONTEXT_TRANSMIT:
+@@ -3548,7 +3549,7 @@ static int ohci_flush_iso_completions(struct fw_iso_context *base)
+ 		smp_mb__after_atomic();
+ 	}
+ 
+-	tasklet_enable(&ctx->context.tasklet);
++	enable_and_queue_work(system_bh_wq, &ctx->context.work);
+ 
+ 	return ret;
+ }
+-- 
+2.17.1
+

@@ -1,0 +1,99 @@
+From 6df44cf06138d3e67f33a301966aca62090d1f61 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:08:01 +0000
+Subject: [PATCH 06/18] archnet:  Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/archnet/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/net/arcnet/arcdevice.h |  3 ++-
+ drivers/net/arcnet/arcnet.c    | 11 ++++++-----
+ 2 files changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/arcnet/arcdevice.h b/drivers/net/arcnet/arcdevice.h
+index b54275389f8a..bee60b377d7c 100644
+--- a/drivers/net/arcnet/arcdevice.h
++++ b/drivers/net/arcnet/arcdevice.h
+@@ -16,6 +16,7 @@
+ 
+ #ifdef __KERNEL__
+ #include <linux/interrupt.h>
++#include <linux/workqueue.h>
+ 
+ /*
+  * RECON_THRESHOLD is the maximum number of RECON messages to receive
+@@ -268,7 +269,7 @@ struct arcnet_local {
+ 
+ 	struct net_device *dev;
+ 	int reply_status;
+-	struct tasklet_struct reply_tasklet;
++	struct work_struct reply_work;
+ 
+ 	/*
+ 	 * Buffer management: an ARCnet card has 4 x 512-byte buffers, each of
+diff --git a/drivers/net/arcnet/arcnet.c b/drivers/net/arcnet/arcnet.c
+index d9e052c49ba1..ad71430207b3 100644
+--- a/drivers/net/arcnet/arcnet.c
++++ b/drivers/net/arcnet/arcnet.c
+@@ -54,6 +54,7 @@
+ #include <linux/errqueue.h>
+ 
+ #include <linux/leds.h>
++#include <linux/workqueue.h>
+ 
+ #include "arcdevice.h"
+ #include "com9026.h"
+@@ -423,9 +424,9 @@ static void reset_device_work(struct work_struct *work)
+ 	rtnl_unlock();
+ }
+ 
+-static void arcnet_reply_tasklet(struct tasklet_struct *t)
++static void arcnet_reply_work(struct work_struct *t)
+ {
+-	struct arcnet_local *lp = from_tasklet(lp, t, reply_tasklet);
++	struct arcnet_local *lp = from_work(lp, t, reply_work);
+ 
+ 	struct sk_buff *ackskb, *skb;
+ 	struct sock_exterr_skb *serr;
+@@ -526,7 +527,7 @@ int arcnet_open(struct net_device *dev)
+ 		arc_cont(D_PROTO, "\n");
+ 	}
+ 
+-	tasklet_setup(&lp->reply_tasklet, arcnet_reply_tasklet);
++	INIT_WORK(&lp->reply_work, arcnet_reply_work);
+ 
+ 	arc_printk(D_INIT, dev, "arcnet_open: resetting card.\n");
+ 
+@@ -619,7 +620,7 @@ int arcnet_close(struct net_device *dev)
+ 	netif_stop_queue(dev);
+ 	netif_carrier_off(dev);
+ 
+-	tasklet_kill(&lp->reply_tasklet);
++	cancel_work_sync(&lp->reply_work);
+ 
+ 	/* flush TX and disable RX */
+ 	lp->hw.intmask(dev, 0);
+@@ -983,7 +984,7 @@ irqreturn_t arcnet_interrupt(int irq, void *dev_id)
+ 						->ack_tx(dev, ackstatus);
+ 				}
+ 				lp->reply_status = ackstatus;
+-				tasklet_hi_schedule(&lp->reply_tasklet);
++				queue_work(system_bh_highpri_wq, &lp->reply_work);
+ 			}
+ 			if (lp->cur_tx != -1)
+ 				release_arcbuf(dev, lp->cur_tx);
+-- 
+2.17.1
+

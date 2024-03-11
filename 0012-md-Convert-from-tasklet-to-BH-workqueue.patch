@@ -1,0 +1,138 @@
+From f284c4735db2cd5cebfac1b639f0b1b613504d93 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:14:47 +0000
+Subject: [PATCH 12/18] md: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/md/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/md/dm-crypt.c  | 23 ++++++++++++-----------
+ drivers/md/dm-verity.h |  7 ++++---
+ 2 files changed, 16 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/md/dm-crypt.c b/drivers/md/dm-crypt.c
+index 855b482cbff1..b80c70ce12f0 100644
+--- a/drivers/md/dm-crypt.c
++++ b/drivers/md/dm-crypt.c
+@@ -42,6 +42,7 @@
+ #include <keys/trusted-type.h>
+ 
+ #include <linux/device-mapper.h>
++#include <linux/workqueue.h>
+ 
+ #include "dm-audit.h"
+ 
+@@ -73,10 +74,10 @@ struct dm_crypt_io {
+ 	struct bio *base_bio;
+ 	u8 *integrity_metadata;
+ 	bool integrity_metadata_from_pool:1;
+-	bool in_tasklet:1;
++	bool in_work:1;
+ 
+ 	struct work_struct work;
+-	struct tasklet_struct tasklet;
++	struct work_struct work;
+ 
+ 	struct convert_context ctx;
+ 
+@@ -1762,7 +1763,7 @@ static void crypt_io_init(struct dm_crypt_io *io, struct crypt_config *cc,
+ 	io->ctx.r.req = NULL;
+ 	io->integrity_metadata = NULL;
+ 	io->integrity_metadata_from_pool = false;
+-	io->in_tasklet = false;
++	io->in_work = false;
+ 	atomic_set(&io->io_pending, 0);
+ }
+ 
+@@ -1802,14 +1803,14 @@ static void crypt_dec_pending(struct dm_crypt_io *io)
+ 	base_bio->bi_status = error;
+ 
+ 	/*
+-	 * If we are running this function from our tasklet,
++	 * If we are running this function from our work,
+ 	 * we can't call bio_endio() here, because it will call
+ 	 * clone_endio() from dm.c, which in turn will
+ 	 * free the current struct dm_crypt_io structure with
+-	 * our tasklet. In this case we need to delay bio_endio()
+-	 * execution to after the tasklet is done and dequeued.
++	 * our work. In this case we need to delay bio_endio()
++	 * execution to after the work is done and dequeued.
+ 	 */
+-	if (io->in_tasklet) {
++	if (io->in_work) {
+ 		INIT_WORK(&io->work, kcryptd_io_bio_endio);
+ 		queue_work(cc->io_queue, &io->work);
+ 		return;
+@@ -2246,7 +2247,7 @@ static void kcryptd_crypt(struct work_struct *work)
+ 		kcryptd_crypt_write_convert(io);
+ }
+ 
+-static void kcryptd_crypt_tasklet(unsigned long work)
++static void kcryptd_crypt_work(unsigned long work)
+ {
+ 	kcryptd_crypt((struct work_struct *)work);
+ }
+@@ -2263,9 +2264,9 @@ static void kcryptd_queue_crypt(struct dm_crypt_io *io)
+ 		 * it is being executed with irqs disabled.
+ 		 */
+ 		if (in_hardirq() || irqs_disabled()) {
+-			io->in_tasklet = true;
+-			tasklet_init(&io->tasklet, kcryptd_crypt_tasklet, (unsigned long)&io->work);
+-			tasklet_schedule(&io->tasklet);
++			io->in_work = true;
++			tasklet_init(&io->work, kcryptd_crypt_work, (unsigned long)&io->work);
++			queue_work(system_bh_wq, &io->work);
+ 			return;
+ 		}
+ 
+diff --git a/drivers/md/dm-verity.h b/drivers/md/dm-verity.h
+index f9d522c870e6..38489af27a94 100644
+--- a/drivers/md/dm-verity.h
++++ b/drivers/md/dm-verity.h
+@@ -14,6 +14,7 @@
+ #include <linux/dm-bufio.h>
+ #include <linux/device-mapper.h>
+ #include <linux/interrupt.h>
++#include <linux/workqueue.h>
+ #include <crypto/hash.h>
+ 
+ #define DM_VERITY_MAX_LEVELS		63
+@@ -53,7 +54,7 @@ struct dm_verity {
+ 	unsigned char levels;	/* the number of tree levels */
+ 	unsigned char version;
+ 	bool hash_failed:1;	/* set if hash of any block failed */
+-	bool use_tasklet:1;	/* try to verify in tasklet before work-queue */
++	bool use_work:1;	/* try to verify in work before work-queue */
+ 	unsigned int digest_size;	/* digest size for the current hash algorithm */
+ 	unsigned int ahash_reqsize;/* the size of temporary space for crypto */
+ 	enum verity_mode mode;	/* mode for handling verification errors */
+@@ -78,12 +79,12 @@ struct dm_verity_io {
+ 
+ 	sector_t block;
+ 	unsigned int n_blocks;
+-	bool in_tasklet;
++	bool in_work;
+ 
+ 	struct bvec_iter iter;
+ 
+ 	struct work_struct work;
+-	struct tasklet_struct tasklet;
++	struct work_struct work;
+ 
+ 	/*
+ 	 * Three variably-size fields follow this struct:
+-- 
+2.17.1
+

@@ -1,0 +1,4014 @@
+From c122cf48db6541e8fb35f816b9ea23a3b5767921 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Mon, 11 Mar 2024 22:05:21 +0000
+Subject: [PATCH 04/18] wireless: Convert from tasklet to BH workqueue
+
+The only generic interface to execute asynchronously in the BH context is
+tasklet; however, it's marked deprecated and has some design flaws. To
+replace tasklets, BH workqueue support was recently added. A BH workqueue
+behaves similarly to regular workqueues except that the queued work items
+are executed in the BH context.
+
+This patch converts drivers/atm/* from tasklet to BH workqueue.
+
+Based on the work done by Tejun Heo <tj@kernel.org>
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
+
+Note: NOT TESTED YET
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ drivers/net/wireless/ath/ath10k/htt_rx.c      |  2 +-
+ drivers/net/wireless/ath/ath11k/ahb.c         | 15 ++--
+ drivers/net/wireless/ath/ath11k/ce.h          |  2 +-
+ drivers/net/wireless/ath/ath11k/pcic.c        | 16 ++--
+ drivers/net/wireless/ath/ath12k/ce.h          |  2 +-
+ drivers/net/wireless/ath/ath12k/pci.c         | 15 ++--
+ drivers/net/wireless/ath/ath5k/ath5k.h        | 17 ++--
+ drivers/net/wireless/ath/ath5k/base.c         | 61 ++++++-------
+ drivers/net/wireless/ath/ath5k/rfkill.c       |  8 +-
+ drivers/net/wireless/ath/ath9k/ath9k.h        | 15 ++--
+ drivers/net/wireless/ath/ath9k/beacon.c       | 13 +--
+ drivers/net/wireless/ath/ath9k/htc.h          | 11 +--
+ drivers/net/wireless/ath/ath9k/htc_drv_main.c |  2 +-
+ drivers/net/wireless/ath/ath9k/htc_drv_txrx.c | 20 ++---
+ drivers/net/wireless/ath/ath9k/main.c         | 37 ++++----
+ drivers/net/wireless/ath/ath9k/wmi.c          | 10 +--
+ drivers/net/wireless/ath/ath9k/wmi.h          |  4 +-
+ drivers/net/wireless/ath/ath9k/wow.c          |  4 +-
+ drivers/net/wireless/ath/carl9170/carl9170.h  |  3 +-
+ drivers/net/wireless/ath/carl9170/usb.c       | 19 ++--
+ drivers/net/wireless/atmel/at76c50x-usb.c     | 11 +--
+ drivers/net/wireless/atmel/at76c50x-usb.h     |  2 +-
+ .../wireless/broadcom/b43legacy/b43legacy.h   |  7 +-
+ .../net/wireless/broadcom/b43legacy/main.c    | 11 +--
+ drivers/net/wireless/broadcom/b43legacy/pio.c | 27 +++---
+ drivers/net/wireless/broadcom/b43legacy/pio.h |  5 +-
+ .../broadcom/brcm80211/brcmsmac/mac80211_if.c | 11 +--
+ .../broadcom/brcm80211/brcmsmac/mac80211_if.h |  5 +-
+ drivers/net/wireless/intel/ipw2x00/ipw2100.c  | 15 ++--
+ drivers/net/wireless/intel/ipw2x00/ipw2100.h  |  3 +-
+ drivers/net/wireless/intel/ipw2x00/ipw2200.c  | 13 +--
+ drivers/net/wireless/intel/ipw2x00/ipw2200.h  |  5 +-
+ .../net/wireless/intel/iwlegacy/3945-mac.c    | 19 ++--
+ .../net/wireless/intel/iwlegacy/4965-mac.c    | 17 ++--
+ drivers/net/wireless/intel/iwlegacy/common.h  |  3 +-
+ drivers/net/wireless/intel/iwlwifi/mvm/sta.h  |  2 +-
+ drivers/net/wireless/intersil/p54/p54pci.c    | 11 +--
+ drivers/net/wireless/intersil/p54/p54pci.h    |  3 +-
+ drivers/net/wireless/marvell/mwl8k.c          | 61 ++++++-------
+ drivers/net/wireless/mediatek/mt76/mt76.h     |  5 +-
+ .../wireless/mediatek/mt76/mt7603/beacon.c    |  4 +-
+ .../net/wireless/mediatek/mt76/mt7603/init.c  |  2 +-
+ .../net/wireless/mediatek/mt76/mt7603/mac.c   |  4 +-
+ .../net/wireless/mediatek/mt76/mt7603/main.c  |  8 +-
+ .../wireless/mediatek/mt76/mt7603/mt7603.h    |  3 +-
+ .../net/wireless/mediatek/mt76/mt7615/mmio.c  |  9 +-
+ .../net/wireless/mediatek/mt76/mt7615/pci.c   |  2 +-
+ .../wireless/mediatek/mt76/mt7615/pci_init.c  |  2 +-
+ .../net/wireless/mediatek/mt76/mt76x0/main.c  |  4 +-
+ .../net/wireless/mediatek/mt76/mt76x0/pci.c   |  2 +-
+ .../net/wireless/mediatek/mt76/mt76x02_dfs.c  | 12 +--
+ .../net/wireless/mediatek/mt76/mt76x02_dfs.h  |  3 +-
+ .../net/wireless/mediatek/mt76/mt76x02_mmio.c | 19 ++--
+ .../net/wireless/mediatek/mt76/mt76x2/pci.c   |  2 +-
+ .../wireless/mediatek/mt76/mt76x2/pci_init.c  |  4 +-
+ .../wireless/mediatek/mt76/mt76x2/pci_main.c  |  8 +-
+ .../net/wireless/mediatek/mt76/mt7915/init.c  |  2 +-
+ .../net/wireless/mediatek/mt76/mt7915/mmio.c  |  9 +-
+ .../net/wireless/mediatek/mt76/mt7921/pci.c   |  4 +-
+ .../net/wireless/mediatek/mt76/mt7925/pci.c   |  4 +-
+ .../net/wireless/mediatek/mt76/mt7996/init.c  |  2 +-
+ .../net/wireless/mediatek/mt76/mt7996/mmio.c  |  9 +-
+ drivers/net/wireless/mediatek/mt7601u/dma.c   | 22 ++---
+ .../net/wireless/mediatek/mt7601u/mt7601u.h   |  5 +-
+ .../wireless/quantenna/qtnfmac/pcie/pcie.c    |  2 +-
+ .../quantenna/qtnfmac/pcie/pcie_priv.h        |  3 +-
+ .../quantenna/qtnfmac/pcie/pearl_pcie.c       | 11 +--
+ .../quantenna/qtnfmac/pcie/topaz_pcie.c       | 13 +--
+ .../net/wireless/ralink/rt2x00/rt2400pci.c    | 49 ++++++-----
+ .../net/wireless/ralink/rt2x00/rt2500pci.c    | 49 ++++++-----
+ .../net/wireless/ralink/rt2x00/rt2800mmio.c   | 87 ++++++++++---------
+ .../net/wireless/ralink/rt2x00/rt2800mmio.h   | 10 +--
+ drivers/net/wireless/ralink/rt2x00/rt2x00.h   | 27 +++---
+ .../net/wireless/ralink/rt2x00/rt2x00dev.c    | 12 +--
+ drivers/net/wireless/ralink/rt2x00/rt61pci.c  | 61 ++++++-------
+ drivers/net/wireless/realtek/rtlwifi/pci.c    | 25 +++---
+ drivers/net/wireless/realtek/rtlwifi/ps.c     |  2 +-
+ drivers/net/wireless/realtek/rtlwifi/usb.c    | 15 ++--
+ drivers/net/wireless/realtek/rtlwifi/usb.h    |  3 +-
+ drivers/net/wireless/realtek/rtlwifi/wifi.h   |  7 +-
+ drivers/net/wireless/zydas/zd1211rw/zd_usb.c  | 15 ++--
+ drivers/net/wireless/zydas/zd1211rw/zd_usb.h  |  3 +-
+ 82 files changed, 550 insertions(+), 501 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath10k/htt_rx.c b/drivers/net/wireless/ath/ath10k/htt_rx.c
+index 7d28ae5453cf..ad806323c06e 100644
+--- a/drivers/net/wireless/ath/ath10k/htt_rx.c
++++ b/drivers/net/wireless/ath/ath10k/htt_rx.c
+@@ -225,7 +225,7 @@ static void ath10k_htt_rx_msdu_buff_replenish(struct ath10k_htt *htt)
+ 	 * once CPU the host system was overwhelmed with RX on ath10k.
+ 	 *
+ 	 * By limiting the number of refills the replenishing occurs
+-	 * progressively. This in turns makes use of the fact tasklets are
++	 * progressively. This in turns makes use of the fact works are
+ 	 * processed in FIFO order. This means actual RX processing can starve
+ 	 * out refilling. If there's not enough buffers on RX ring FW will not
+ 	 * report RX until it is refilled with enough buffers. This
+diff --git a/drivers/net/wireless/ath/ath11k/ahb.c b/drivers/net/wireless/ath/ath11k/ahb.c
+index 7c0a23517949..98ecf37b461d 100644
+--- a/drivers/net/wireless/ath/ath11k/ahb.c
++++ b/drivers/net/wireless/ath/ath11k/ahb.c
+@@ -20,6 +20,7 @@
+ #include "pcic.h"
+ #include <linux/soc/qcom/smem.h>
+ #include <linux/soc/qcom/smem_state.h>
++#include <linux/workqueue.h>
+ 
+ static const struct of_device_id ath11k_ahb_of_match[] = {
+ 	/* TODO: Should we change the compatible string to something similar
+@@ -206,7 +207,7 @@ static inline void ath11k_ahb_write32(struct ath11k_base *ab, u32 offset, u32 va
+ 	iowrite32(value, ab->mem + offset);
+ }
+ 
+-static void ath11k_ahb_kill_tasklets(struct ath11k_base *ab)
++static void ath11k_ahb_kill_works(struct ath11k_base *ab)
+ {
+ 	int i;
+ 
+@@ -216,7 +217,7 @@ static void ath11k_ahb_kill_tasklets(struct ath11k_base *ab)
+ 		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
+ 			continue;
+ 
+-		tasklet_kill(&ce_pipe->intr_tq);
++		cancel_work_sync(&ce_pipe->intr_tq);
+ 	}
+ }
+ 
+@@ -396,7 +397,7 @@ static void ath11k_ahb_stop(struct ath11k_base *ab)
+ 	if (!test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags))
+ 		ath11k_ahb_ce_irqs_disable(ab);
+ 	ath11k_ahb_sync_ce_irqs(ab);
+-	ath11k_ahb_kill_tasklets(ab);
++	ath11k_ahb_kill_works(ab);
+ 	del_timer_sync(&ab->rx_replenish_retry);
+ 	ath11k_ce_cleanup_pipes(ab);
+ }
+@@ -463,9 +464,9 @@ static void ath11k_ahb_free_irq(struct ath11k_base *ab)
+ 	ath11k_ahb_free_ext_irq(ab);
+ }
+ 
+-static void ath11k_ahb_ce_tasklet(struct tasklet_struct *t)
++static void ath11k_ahb_ce_work(struct work_struct *t)
+ {
+-	struct ath11k_ce_pipe *ce_pipe = from_tasklet(ce_pipe, t, intr_tq);
++	struct ath11k_ce_pipe *ce_pipe = from_work(ce_pipe, t, intr_tq);
+ 
+ 	ath11k_ce_per_engine_service(ce_pipe->ab, ce_pipe->pipe_num);
+ 
+@@ -481,7 +482,7 @@ static irqreturn_t ath11k_ahb_ce_interrupt_handler(int irq, void *arg)
+ 
+ 	ath11k_ahb_ce_irq_disable(ce_pipe->ab, ce_pipe->pipe_num);
+ 
+-	tasklet_schedule(&ce_pipe->intr_tq);
++	queue_work(system_bh_wq, &ce_pipe->intr_tq);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -619,7 +620,7 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+ 
+ 		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
+ 
+-		tasklet_setup(&ce_pipe->intr_tq, ath11k_ahb_ce_tasklet);
++		INIT_WORK(&ce_pipe->intr_tq, ath11k_ahb_ce_work);
+ 		irq = platform_get_irq_byname(ab->pdev, irq_name[irq_idx]);
+ 		ret = request_irq(irq, ath11k_ahb_ce_interrupt_handler,
+ 				  IRQF_TRIGGER_RISING, irq_name[irq_idx],
+diff --git a/drivers/net/wireless/ath/ath11k/ce.h b/drivers/net/wireless/ath/ath11k/ce.h
+index 69946fc70077..83ebd83b610d 100644
+--- a/drivers/net/wireless/ath/ath11k/ce.h
++++ b/drivers/net/wireless/ath/ath11k/ce.h
+@@ -175,7 +175,7 @@ struct ath11k_ce_pipe {
+ 	void (*send_cb)(struct ath11k_base *, struct sk_buff *);
+ 	void (*recv_cb)(struct ath11k_base *, struct sk_buff *);
+ 
+-	struct tasklet_struct intr_tq;
++	struct work_struct intr_tq;
+ 	struct ath11k_ce_ring *src_ring;
+ 	struct ath11k_ce_ring *dest_ring;
+ 	struct ath11k_ce_ring *status_ring;
+diff --git a/drivers/net/wireless/ath/ath11k/pcic.c b/drivers/net/wireless/ath/ath11k/pcic.c
+index 15e2ceb22a44..49070704649d 100644
+--- a/drivers/net/wireless/ath/ath11k/pcic.c
++++ b/drivers/net/wireless/ath/ath11k/pcic.c
+@@ -378,9 +378,9 @@ static void ath11k_pcic_sync_ce_irqs(struct ath11k_base *ab)
+ 	}
+ }
+ 
+-static void ath11k_pcic_ce_tasklet(struct tasklet_struct *t)
++static void ath11k_pcic_ce_work(struct work_struct *t)
+ {
+-	struct ath11k_ce_pipe *ce_pipe = from_tasklet(ce_pipe, t, intr_tq);
++	struct ath11k_ce_pipe *ce_pipe = from_work(ce_pipe, t, intr_tq);
+ 	int irq_idx = ATH11K_PCI_IRQ_CE0_OFFSET + ce_pipe->pipe_num;
+ 
+ 	ath11k_ce_per_engine_service(ce_pipe->ab, ce_pipe->pipe_num);
+@@ -402,7 +402,7 @@ static irqreturn_t ath11k_pcic_ce_interrupt_handler(int irq, void *arg)
+ 
+ 	disable_irq_nosync(ab->irq_num[irq_idx]);
+ 
+-	tasklet_schedule(&ce_pipe->intr_tq);
++	queue_work(system_bh_wq, &ce_pipe->intr_tq);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -646,7 +646,7 @@ int ath11k_pcic_config_irq(struct ath11k_base *ab)
+ 
+ 		irq_idx = ATH11K_PCI_IRQ_CE0_OFFSET + i;
+ 
+-		tasklet_setup(&ce_pipe->intr_tq, ath11k_pcic_ce_tasklet);
++		INIT_WORK(&ce_pipe->intr_tq, ath11k_pcic_ce_work);
+ 
+ 		ret = request_irq(irq, ath11k_pcic_ce_interrupt_handler,
+ 				  irq_flags, irq_name[irq_idx], ce_pipe);
+@@ -684,7 +684,7 @@ void ath11k_pcic_ce_irqs_enable(struct ath11k_base *ab)
+ }
+ EXPORT_SYMBOL(ath11k_pcic_ce_irqs_enable);
+ 
+-static void ath11k_pcic_kill_tasklets(struct ath11k_base *ab)
++static void ath11k_pcic_kill_works(struct ath11k_base *ab)
+ {
+ 	int i;
+ 
+@@ -694,7 +694,7 @@ static void ath11k_pcic_kill_tasklets(struct ath11k_base *ab)
+ 		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
+ 			continue;
+ 
+-		tasklet_kill(&ce_pipe->intr_tq);
++		cancel_work_sync(&ce_pipe->intr_tq);
+ 	}
+ }
+ 
+@@ -702,7 +702,7 @@ void ath11k_pcic_ce_irq_disable_sync(struct ath11k_base *ab)
+ {
+ 	ath11k_pcic_ce_irqs_disable(ab);
+ 	ath11k_pcic_sync_ce_irqs(ab);
+-	ath11k_pcic_kill_tasklets(ab);
++	ath11k_pcic_kill_works(ab);
+ }
+ EXPORT_SYMBOL(ath11k_pcic_ce_irq_disable_sync);
+ 
+@@ -813,7 +813,7 @@ void ath11k_pci_disable_ce_irqs_except_wake_irq(struct ath11k_base *ab)
+ 
+ 		disable_irq_nosync(ab->irq_num[irq_idx]);
+ 		synchronize_irq(ab->irq_num[irq_idx]);
+-		tasklet_kill(&ce_pipe->intr_tq);
++		cancel_work_sync(&ce_pipe->intr_tq);
+ 	}
+ }
+ EXPORT_SYMBOL(ath11k_pci_disable_ce_irqs_except_wake_irq);
+diff --git a/drivers/net/wireless/ath/ath12k/ce.h b/drivers/net/wireless/ath/ath12k/ce.h
+index 79af3b6159f1..b775e7b4b29c 100644
+--- a/drivers/net/wireless/ath/ath12k/ce.h
++++ b/drivers/net/wireless/ath/ath12k/ce.h
+@@ -148,7 +148,7 @@ struct ath12k_ce_pipe {
+ 	void (*send_cb)(struct ath12k_ce_pipe *pipe);
+ 	void (*recv_cb)(struct ath12k_base *ab, struct sk_buff *skb);
+ 
+-	struct tasklet_struct intr_tq;
++	struct work_struct intr_tq;
+ 	struct ath12k_ce_ring *src_ring;
+ 	struct ath12k_ce_ring *dest_ring;
+ 	struct ath12k_ce_ring *status_ring;
+diff --git a/drivers/net/wireless/ath/ath12k/pci.c b/drivers/net/wireless/ath/ath12k/pci.c
+index f0d2e2d8719c..091065425825 100644
+--- a/drivers/net/wireless/ath/ath12k/pci.c
++++ b/drivers/net/wireless/ath/ath12k/pci.c
+@@ -7,6 +7,7 @@
+ #include <linux/module.h>
+ #include <linux/msi.h>
+ #include <linux/pci.h>
++#include <linux/workqueue.h>
+ 
+ #include "pci.h"
+ #include "core.h"
+@@ -421,9 +422,9 @@ static void ath12k_pci_sync_ce_irqs(struct ath12k_base *ab)
+ 	}
+ }
+ 
+-static void ath12k_pci_ce_tasklet(struct tasklet_struct *t)
++static void ath12k_pci_ce_work(struct work_struct *t)
+ {
+-	struct ath12k_ce_pipe *ce_pipe = from_tasklet(ce_pipe, t, intr_tq);
++	struct ath12k_ce_pipe *ce_pipe = from_work(ce_pipe, t, intr_tq);
+ 	int irq_idx = ATH12K_PCI_IRQ_CE0_OFFSET + ce_pipe->pipe_num;
+ 
+ 	ath12k_ce_per_engine_service(ce_pipe->ab, ce_pipe->pipe_num);
+@@ -445,7 +446,7 @@ static irqreturn_t ath12k_pci_ce_interrupt_handler(int irq, void *arg)
+ 
+ 	disable_irq_nosync(ab->irq_num[irq_idx]);
+ 
+-	tasklet_schedule(&ce_pipe->intr_tq);
++	queue_work(system_bh_wq, &ce_pipe->intr_tq);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -654,7 +655,7 @@ static int ath12k_pci_config_irq(struct ath12k_base *ab)
+ 
+ 		irq_idx = ATH12K_PCI_IRQ_CE0_OFFSET + i;
+ 
+-		tasklet_setup(&ce_pipe->intr_tq, ath12k_pci_ce_tasklet);
++		INIT_WORK(&ce_pipe->intr_tq, ath12k_pci_ce_work);
+ 
+ 		ret = request_irq(irq, ath12k_pci_ce_interrupt_handler,
+ 				  ab_pci->irq_flags, irq_name[irq_idx],
+@@ -910,7 +911,7 @@ static void ath12k_pci_aspm_restore(struct ath12k_pci *ab_pci)
+ 						   PCI_EXP_LNKCTL_ASPMC);
+ }
+ 
+-static void ath12k_pci_kill_tasklets(struct ath12k_base *ab)
++static void ath12k_pci_kill_works(struct ath12k_base *ab)
+ {
+ 	int i;
+ 
+@@ -920,7 +921,7 @@ static void ath12k_pci_kill_tasklets(struct ath12k_base *ab)
+ 		if (ath12k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
+ 			continue;
+ 
+-		tasklet_kill(&ce_pipe->intr_tq);
++		cancel_work_sync(&ce_pipe->intr_tq);
+ 	}
+ }
+ 
+@@ -928,7 +929,7 @@ static void ath12k_pci_ce_irq_disable_sync(struct ath12k_base *ab)
+ {
+ 	ath12k_pci_ce_irqs_disable(ab);
+ 	ath12k_pci_sync_ce_irqs(ab);
+-	ath12k_pci_kill_tasklets(ab);
++	ath12k_pci_kill_works(ab);
+ }
+ 
+ int ath12k_pci_map_service_to_pipe(struct ath12k_base *ab, u16 service_id,
+diff --git a/drivers/net/wireless/ath/ath5k/ath5k.h b/drivers/net/wireless/ath/ath5k/ath5k.h
+index f595204f493d..af4b35592f6c 100644
+--- a/drivers/net/wireless/ath/ath5k/ath5k.h
++++ b/drivers/net/wireless/ath/ath5k/ath5k.h
+@@ -28,6 +28,7 @@
+ #include <linux/types.h>
+ #include <linux/average.h>
+ #include <linux/leds.h>
++#include <linux/workqueue.h>
+ #include <net/mac80211.h>
+ #include <net/cfg80211.h>
+ 
+@@ -1189,8 +1190,8 @@ struct ath5k_rfkill {
+ 	u16 gpio;
+ 	/* polarity of rfkill GPIO PIN */
+ 	bool polarity;
+-	/* RFKILL toggle tasklet */
+-	struct tasklet_struct toggleq;
++	/* RFKILL toggle work */
++	struct work_struct toggleq;
+ };
+ 
+ /* statistics */
+@@ -1295,8 +1296,8 @@ struct ath5k_hw {
+ 	enum ath5k_int		imask;		/* interrupt mask copy */
+ 
+ 	spinlock_t		irqlock;
+-	bool			rx_pending;	/* rx tasklet pending */
+-	bool			tx_pending;	/* tx tasklet pending */
++	bool			rx_pending;	/* rx work pending */
++	bool			tx_pending;	/* tx work pending */
+ 
+ 	u8			bssidmask[ETH_ALEN];
+ 
+@@ -1309,20 +1310,20 @@ struct ath5k_hw {
+ 	struct list_head	rxbuf;		/* receive buffer */
+ 	spinlock_t		rxbuflock;
+ 	u32			*rxlink;	/* link ptr in last RX desc */
+-	struct tasklet_struct	rxtq;		/* rx intr tasklet */
++	struct work_struct 	rxtq;		/* rx intr work */
+ 	struct ath5k_led	rx_led;		/* rx led */
+ 
+ 	struct list_head	txbuf;		/* transmit buffer */
+ 	spinlock_t		txbuflock;
+ 	unsigned int		txbuf_len;	/* buf count in txbuf list */
+ 	struct ath5k_txq	txqs[AR5K_NUM_TX_QUEUES];	/* tx queues */
+-	struct tasklet_struct	txtq;		/* tx intr tasklet */
++	struct work_struct 	txtq;		/* tx intr work */
+ 	struct ath5k_led	tx_led;		/* tx led */
+ 
+ 	struct ath5k_rfkill	rf_kill;
+ 
+ 	spinlock_t		block;		/* protects beacon */
+-	struct tasklet_struct	beacontq;	/* beacon intr tasklet */
++	struct work_struct 	beacontq;	/* beacon intr work */
+ 	struct list_head	bcbuf;		/* beacon buffer */
+ 	struct ieee80211_vif	*bslot[ATH_BCBUF];
+ 	u16			num_ap_vifs;
+@@ -1341,7 +1342,7 @@ struct ath5k_hw {
+ 	struct ath5k_statistics	stats;
+ 
+ 	struct ath5k_ani_state	ani_state;
+-	struct tasklet_struct	ani_tasklet;	/* ANI calibration */
++	struct work_struct 	ani_work;	/* ANI calibration */
+ 
+ 	struct delayed_work	tx_complete_work;
+ 
+diff --git a/drivers/net/wireless/ath/ath5k/base.c b/drivers/net/wireless/ath/ath5k/base.c
+index 9f534ed2fbb3..1586f9b4032f 100644
+--- a/drivers/net/wireless/ath/ath5k/base.c
++++ b/drivers/net/wireless/ath/ath5k/base.c
+@@ -55,6 +55,7 @@
+ #include <linux/slab.h>
+ #include <linux/etherdevice.h>
+ #include <linux/nl80211.h>
++#include <linux/workqueue.h>
+ 
+ #include <net/cfg80211.h>
+ #include <net/ieee80211_radiotap.h>
+@@ -1149,7 +1150,7 @@ ath5k_beaconq_config(struct ath5k_hw *ah)
+  * of a reset or during shutdown.
+  *
+  * NB:	this assumes output has been stopped and
+- *	we do not need to block ath5k_tx_tasklet
++ *	we do not need to block ath5k_tx_work
+  */
+ static void
+ ath5k_drain_tx_buffs(struct ath5k_hw *ah)
+@@ -1581,12 +1582,12 @@ ath5k_set_current_imask(struct ath5k_hw *ah)
+ }
+ 
+ static void
+-ath5k_tasklet_rx(struct tasklet_struct *t)
++ath5k_work_rx(struct tasklet_struct *t)
+ {
+ 	struct ath5k_rx_status rs = {};
+ 	struct sk_buff *skb, *next_skb;
+ 	dma_addr_t next_skb_addr;
+-	struct ath5k_hw *ah = from_tasklet(ah, t, rxtq);
++	struct ath5k_hw *ah = from_work(ah, t, rxtq);
+ 	struct ath_common *common = ath5k_hw_common(ah);
+ 	struct ath5k_buf *bf;
+ 	struct ath5k_desc *ds;
+@@ -1829,10 +1830,10 @@ ath5k_tx_processq(struct ath5k_hw *ah, struct ath5k_txq *txq)
+ }
+ 
+ static void
+-ath5k_tasklet_tx(struct tasklet_struct *t)
++ath5k_work_tx(struct tasklet_struct *t)
+ {
+ 	int i;
+-	struct ath5k_hw *ah = from_tasklet(ah, t, txtq);
++	struct ath5k_hw *ah = from_work(ah, t, txtq);
+ 
+ 	for (i = 0; i < AR5K_NUM_TX_QUEUES; i++)
+ 		if (ah->txqs[i].setup && (ah->ah_txq_isr_txok_all & BIT(i)))
+@@ -1966,7 +1967,7 @@ ath5k_beacon_update(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+  * frame contents are done as needed and the slot time is
+  * also adjusted based on current state.
+  *
+- * This is called from software irq context (beacontq tasklets)
++ * This is called from software irq context (beacontq works)
+  * or user context from ath5k_beacon_config.
+  */
+ static void
+@@ -2221,9 +2222,9 @@ ath5k_beacon_config(struct ath5k_hw *ah)
+ 	spin_unlock_bh(&ah->block);
+ }
+ 
+-static void ath5k_tasklet_beacon(struct tasklet_struct *t)
++static void ath5k_work_beacon(struct work_struct *t)
+ {
+-	struct ath5k_hw *ah = from_tasklet(ah, t, beacontq);
++	struct ath5k_hw *ah = from_work(ah, t, beacontq);
+ 
+ 	/*
+ 	 * Software beacon alert--time to send a beacon.
+@@ -2266,7 +2267,7 @@ ath5k_intr_calibration_poll(struct ath5k_hw *ah)
+ 
+ 		ah->ah_cal_next_ani = jiffies +
+ 			msecs_to_jiffies(ATH5K_TUNE_CALIBRATION_INTERVAL_ANI);
+-		tasklet_schedule(&ah->ani_tasklet);
++		queue_work(system_bh_wq, &ah->ani_work);
+ 
+ 	} else if (time_is_before_eq_jiffies(ah->ah_cal_next_short) &&
+ 		!(ah->ah_cal_mask & AR5K_CALIBRATION_FULL) &&
+@@ -2292,14 +2293,14 @@ static void
+ ath5k_schedule_rx(struct ath5k_hw *ah)
+ {
+ 	ah->rx_pending = true;
+-	tasklet_schedule(&ah->rxtq);
++	queue_work(system_bh_wq, &ah->rxtq);
+ }
+ 
+ static void
+ ath5k_schedule_tx(struct ath5k_hw *ah)
+ {
+ 	ah->tx_pending = true;
+-	tasklet_schedule(&ah->txtq);
++	queue_work(system_bh_wq, &ah->txtq);
+ }
+ 
+ static irqreturn_t
+@@ -2371,9 +2372,9 @@ ath5k_intr(int irq, void *dev_id)
+ 
+ 		} else {
+ 
+-			/* Software Beacon Alert -> Schedule beacon tasklet */
++			/* Software Beacon Alert -> Schedule beacon work */
+ 			if (status & AR5K_INT_SWBA)
+-				tasklet_hi_schedule(&ah->beacontq);
++				queue_work(system_bh_highpri_wq, &ah->beacontq);
+ 
+ 			/*
+ 			 * No more RX descriptors -> Just count
+@@ -2390,11 +2391,11 @@ ath5k_intr(int irq, void *dev_id)
+ 			if (status & AR5K_INT_TXURN)
+ 				ath5k_hw_update_tx_triglevel(ah, true);
+ 
+-			/* RX -> Schedule rx tasklet */
++			/* RX -> Schedule rx work */
+ 			if (status & (AR5K_INT_RXOK | AR5K_INT_RXERR))
+ 				ath5k_schedule_rx(ah);
+ 
+-			/* TX -> Schedule tx tasklet */
++			/* TX -> Schedule tx work */
+ 			if (status & (AR5K_INT_TXOK
+ 					| AR5K_INT_TXDESC
+ 					| AR5K_INT_TXERR
+@@ -2414,7 +2415,7 @@ ath5k_intr(int irq, void *dev_id)
+ 
+ 			/* GPIO -> Notify RFKill layer */
+ 			if (status & AR5K_INT_GPIO)
+-				tasklet_schedule(&ah->rf_kill.toggleq);
++				queue_work(system_bh_wq, &ah->rf_kill.toggleq);
+ 
+ 		}
+ 
+@@ -2426,7 +2427,7 @@ ath5k_intr(int irq, void *dev_id)
+ 	/*
+ 	 * Until we handle rx/tx interrupts mask them on IMR
+ 	 *
+-	 * NOTE: ah->(rx/tx)_pending are set when scheduling the tasklets
++	 * NOTE: ah->(rx/tx)_pending are set when scheduling the works
+ 	 * and unset after we 've handled the interrupts.
+ 	 */
+ 	if (ah->rx_pending || ah->tx_pending)
+@@ -2492,9 +2493,9 @@ ath5k_calibrate_work(struct work_struct *work)
+ 
+ 
+ static void
+-ath5k_tasklet_ani(struct tasklet_struct *t)
++ath5k_work_ani(struct tasklet_struct *t)
+ {
+-	struct ath5k_hw *ah = from_tasklet(ah, t, ani_tasklet);
++	struct ath5k_hw *ah = from_work(ah, t, ani_work);
+ 
+ 	ah->ah_cal_mask |= AR5K_CALIBRATION_ANI;
+ 	ath5k_ani_calibration(ah);
+@@ -2831,14 +2832,14 @@ int ath5k_start(struct ieee80211_hw *hw)
+ 	return ret;
+ }
+ 
+-static void ath5k_stop_tasklets(struct ath5k_hw *ah)
++static void ath5k_stop_works(struct ath5k_hw *ah)
+ {
+ 	ah->rx_pending = false;
+ 	ah->tx_pending = false;
+-	tasklet_kill(&ah->rxtq);
+-	tasklet_kill(&ah->txtq);
+-	tasklet_kill(&ah->beacontq);
+-	tasklet_kill(&ah->ani_tasklet);
++	cancel_work_sync(&ah->rxtq);
++	cancel_work_sync(&ah->txtq);
++	cancel_work_sync(&ah->beacontq);
++	cancel_work_sync(&ah->ani_work);
+ }
+ 
+ /*
+@@ -2883,7 +2884,7 @@ void ath5k_stop(struct ieee80211_hw *hw)
+ 
+ 	mutex_unlock(&ah->lock);
+ 
+-	ath5k_stop_tasklets(ah);
++	ath5k_stop_works(ah);
+ 
+ 	clear_bit(ATH_STAT_STARTED, ah->status);
+ 	cancel_delayed_work_sync(&ah->tx_complete_work);
+@@ -2912,7 +2913,7 @@ ath5k_reset(struct ath5k_hw *ah, struct ieee80211_channel *chan,
+ 
+ 	ath5k_hw_set_imr(ah, 0);
+ 	synchronize_irq(ah->irq);
+-	ath5k_stop_tasklets(ah);
++	ath5k_stop_works(ah);
+ 
+ 	/* Save ani mode and disable ANI during
+ 	 * reset. If we don't we might get false
+@@ -3114,10 +3115,10 @@ ath5k_init(struct ieee80211_hw *hw)
+ 		hw->queues = 1;
+ 	}
+ 
+-	tasklet_setup(&ah->rxtq, ath5k_tasklet_rx);
+-	tasklet_setup(&ah->txtq, ath5k_tasklet_tx);
+-	tasklet_setup(&ah->beacontq, ath5k_tasklet_beacon);
+-	tasklet_setup(&ah->ani_tasklet, ath5k_tasklet_ani);
++	INIT_WORK(&ah->rxtq, ath5k_work_rx);
++	INIT_WORK(&ah->txtq, ath5k_work_tx);
++	INIT_WORK(&ah->beacontq, ath5k_work_beacon);
++	INIT_WORK(&ah->ani_work, ath5k_work_ani);
+ 
+ 	INIT_WORK(&ah->reset_work, ath5k_reset_work);
+ 	INIT_WORK(&ah->calib_work, ath5k_calibrate_work);
+diff --git a/drivers/net/wireless/ath/ath5k/rfkill.c b/drivers/net/wireless/ath/ath5k/rfkill.c
+index 855ed7fc720d..1e06269b2688 100644
+--- a/drivers/net/wireless/ath/ath5k/rfkill.c
++++ b/drivers/net/wireless/ath/ath5k/rfkill.c
+@@ -73,9 +73,9 @@ ath5k_is_rfkill_set(struct ath5k_hw *ah)
+ }
+ 
+ static void
+-ath5k_tasklet_rfkill_toggle(struct tasklet_struct *t)
++ath5k_work_rfkill_toggle(struct tasklet_struct *t)
+ {
+-	struct ath5k_hw *ah = from_tasklet(ah, t, rf_kill.toggleq);
++	struct ath5k_hw *ah = from_work(ah, t, rf_kill.toggleq);
+ 	bool blocked;
+ 
+ 	blocked = ath5k_is_rfkill_set(ah);
+@@ -90,7 +90,7 @@ ath5k_rfkill_hw_start(struct ath5k_hw *ah)
+ 	ah->rf_kill.gpio = ah->ah_capabilities.cap_eeprom.ee_rfkill_pin;
+ 	ah->rf_kill.polarity = ah->ah_capabilities.cap_eeprom.ee_rfkill_pol;
+ 
+-	tasklet_setup(&ah->rf_kill.toggleq, ath5k_tasklet_rfkill_toggle);
++	INIT_WORK(&ah->rf_kill.toggleq, ath5k_work_rfkill_toggle);
+ 
+ 	ath5k_rfkill_disable(ah);
+ 
+@@ -107,7 +107,7 @@ ath5k_rfkill_hw_stop(struct ath5k_hw *ah)
+ 	if (AR5K_EEPROM_HDR_RFKILL(ah->ah_capabilities.cap_eeprom.ee_header))
+ 		ath5k_rfkill_set_intr(ah, false);
+ 
+-	tasklet_kill(&ah->rf_kill.toggleq);
++	cancel_work_sync(&ah->rf_kill.toggleq);
+ 
+ 	/* enable RFKILL when stopping HW so Wifi LED is turned off */
+ 	ath5k_rfkill_enable(ah);
+diff --git a/drivers/net/wireless/ath/ath9k/ath9k.h b/drivers/net/wireless/ath/ath9k/ath9k.h
+index 668fc07b3073..4af8d64ee49b 100644
+--- a/drivers/net/wireless/ath/ath9k/ath9k.h
++++ b/drivers/net/wireless/ath/ath9k/ath9k.h
+@@ -25,6 +25,7 @@
+ #include <linux/completion.h>
+ #include <linux/time.h>
+ #include <linux/hw_random.h>
++#include <linux/workqueue.h>
+ 
+ #include "common.h"
+ #include "debug.h"
+@@ -578,7 +579,7 @@ bool ath_stoprecv(struct ath_softc *sc);
+ u32 ath_calcrxfilter(struct ath_softc *sc);
+ int ath_rx_init(struct ath_softc *sc, int nbufs);
+ void ath_rx_cleanup(struct ath_softc *sc);
+-int ath_rx_tasklet(struct ath_softc *sc, int flush, bool hp);
++int ath_rx_work(struct ath_softc *sc, int flush, bool hp);
+ struct ath_txq *ath_txq_setup(struct ath_softc *sc, int qtype, int subtype);
+ void ath_txq_unlock_complete(struct ath_softc *sc, struct ath_txq *txq);
+ void ath_tx_cleanupq(struct ath_softc *sc, struct ath_txq *txq);
+@@ -599,8 +600,8 @@ int ath_tx_start(struct ieee80211_hw *hw, struct sk_buff *skb,
+ 		 struct ath_tx_control *txctl);
+ void ath_tx_cabq(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+ 		 struct sk_buff *skb);
+-void ath_tx_tasklet(struct ath_softc *sc);
+-void ath_tx_edma_tasklet(struct ath_softc *sc);
++void ath_tx_work(struct ath_softc *sc);
++void ath_tx_edma_work(struct ath_softc *sc);
+ int ath_tx_aggr_start(struct ath_softc *sc, struct ieee80211_sta *sta,
+ 		      u16 tid, u16 *ssn);
+ void ath_tx_aggr_stop(struct ath_softc *sc, struct ieee80211_sta *sta, u16 tid);
+@@ -714,7 +715,7 @@ struct ath_beacon {
+ 	bool tx_last;
+ };
+ 
+-void ath9k_beacon_tasklet(struct tasklet_struct *t);
++void ath9k_beacon_work(struct work_struct *t);
+ void ath9k_beacon_config(struct ath_softc *sc, struct ieee80211_vif *main_vif,
+ 			 bool beacons);
+ void ath9k_beacon_assign_slot(struct ath_softc *sc, struct ieee80211_vif *vif);
+@@ -988,8 +989,8 @@ struct ath_softc {
+ 	struct survey_info survey[ATH9K_NUM_CHANNELS];
+ 
+ 	spinlock_t intr_lock;
+-	struct tasklet_struct intr_tq;
+-	struct tasklet_struct bcon_tasklet;
++	struct work_struct intr_tq;
++	struct work_struct bcon_work;
+ 	struct ath_hw *sc_ah;
+ 	void __iomem *mem;
+ 	int irq;
+@@ -1119,7 +1120,7 @@ static inline void ath_read_cachesize(struct ath_common *common, int *csz)
+ 	common->bus_ops->read_cachesize(common, csz);
+ }
+ 
+-void ath9k_tasklet(struct tasklet_struct *t);
++void ath9k_work(struct work_struct *t);
+ int ath_cabq_update(struct ath_softc *);
+ u8 ath9k_parse_mpdudensity(u8 mpdudensity);
+ irqreturn_t ath_isr(int irq, void *dev);
+diff --git a/drivers/net/wireless/ath/ath9k/beacon.c b/drivers/net/wireless/ath/ath9k/beacon.c
+index ee72faac2f1d..2c096ee07a76 100644
+--- a/drivers/net/wireless/ath/ath9k/beacon.c
++++ b/drivers/net/wireless/ath/ath9k/beacon.c
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include <linux/dma-mapping.h>
++#include <linux/workqueue.h>
+ #include "ath9k.h"
+ 
+ #define FUDGE 2
+@@ -223,7 +224,7 @@ void ath9k_beacon_remove_slot(struct ath_softc *sc, struct ieee80211_vif *vif)
+ 	ath_dbg(common, CONFIG, "Removing interface at beacon slot: %d\n",
+ 		avp->av_bslot);
+ 
+-	tasklet_disable(&sc->bcon_tasklet);
++	disable_work_sync(&sc->bcon_work);
+ 
+ 	if (bf && bf->bf_mpdu) {
+ 		struct sk_buff *skb = bf->bf_mpdu;
+@@ -238,7 +239,7 @@ void ath9k_beacon_remove_slot(struct ath_softc *sc, struct ieee80211_vif *vif)
+ 	sc->beacon.bslot[avp->av_bslot] = NULL;
+ 	list_add_tail(&bf->list, &sc->beacon.bbuf);
+ 
+-	tasklet_enable(&sc->bcon_tasklet);
++	enable_and_queue_work(system_bh_wq, &sc->bcon_work);
+ }
+ 
+ void ath9k_beacon_ensure_primary_slot(struct ath_softc *sc)
+@@ -251,7 +252,7 @@ void ath9k_beacon_ensure_primary_slot(struct ath_softc *sc)
+ 	int first_slot = ATH_BCBUF;
+ 	int slot;
+ 
+-	tasklet_disable_in_atomic(&sc->bcon_tasklet);
++	tasklet_disable_in_atomic(&sc->bcon_work);
+ 
+ 	/* Find first taken slot. */
+ 	for (slot = 0; slot < ATH_BCBUF; slot++) {
+@@ -300,7 +301,7 @@ void ath9k_beacon_ensure_primary_slot(struct ath_softc *sc)
+ 	/* The slots tsf_adjust will be updated by ath9k_beacon_config later. */
+ 
+ out:
+-	tasklet_enable(&sc->bcon_tasklet);
++	enable_and_queue_work(system_bh_wq, &sc->bcon_work);
+ }
+ 
+ static int ath9k_beacon_choose_slot(struct ath_softc *sc)
+@@ -385,9 +386,9 @@ void ath9k_csa_update(struct ath_softc *sc)
+ 						   ath9k_csa_update_vif, sc);
+ }
+ 
+-void ath9k_beacon_tasklet(struct tasklet_struct *t)
++void ath9k_beacon_work(struct tasklet_struct *t)
+ {
+-	struct ath_softc *sc = from_tasklet(sc, t, bcon_tasklet);
++	struct ath_softc *sc = from_work(sc, t, bcon_work);
+ 	struct ath_hw *ah = sc->sc_ah;
+ 	struct ath_common *common = ath9k_hw_common(ah);
+ 	struct ath_buf *bf = NULL;
+diff --git a/drivers/net/wireless/ath/ath9k/htc.h b/drivers/net/wireless/ath/ath9k/htc.h
+index 237f4ec2cffd..dea5a402d8c5 100644
+--- a/drivers/net/wireless/ath/ath9k/htc.h
++++ b/drivers/net/wireless/ath/ath9k/htc.h
+@@ -25,6 +25,7 @@
+ #include <linux/etherdevice.h>
+ #include <linux/leds.h>
+ #include <linux/slab.h>
++#include <linux/workqueue.h>
+ #include <net/mac80211.h>
+ 
+ #include "common.h"
+@@ -504,10 +505,10 @@ struct ath9k_htc_priv {
+ 	struct ath9k_htc_rx rx;
+ 	struct ath9k_htc_tx tx;
+ 
+-	struct tasklet_struct swba_tasklet;
+-	struct tasklet_struct rx_tasklet;
++	struct work_struct swba_work;
++	struct work_struct rx_work;
+ 	struct delayed_work ani_work;
+-	struct tasklet_struct tx_failed_tasklet;
++	struct work_struct tx_failed_work;
+ 	struct work_struct ps_work;
+ 	struct work_struct fatal_work;
+ 
+@@ -589,14 +590,14 @@ int ath9k_htc_tx_get_slot(struct ath9k_htc_priv *priv);
+ void ath9k_htc_tx_clear_slot(struct ath9k_htc_priv *priv, int slot);
+ void ath9k_htc_tx_drain(struct ath9k_htc_priv *priv);
+ void ath9k_htc_txstatus(struct ath9k_htc_priv *priv, void *wmi_event);
+-void ath9k_tx_failed_tasklet(struct tasklet_struct *t);
++void ath9k_tx_failed_work(struct work_struct *t);
+ void ath9k_htc_tx_cleanup_timer(struct timer_list *t);
+ bool ath9k_htc_csa_is_finished(struct ath9k_htc_priv *priv);
+ 
+ int ath9k_rx_init(struct ath9k_htc_priv *priv);
+ void ath9k_rx_cleanup(struct ath9k_htc_priv *priv);
+ void ath9k_host_rx_init(struct ath9k_htc_priv *priv);
+-void ath9k_rx_tasklet(struct tasklet_struct *t);
++void ath9k_rx_work(struct work_struct *t);
+ u32 ath9k_htc_calcrxfilter(struct ath9k_htc_priv *priv);
+ 
+ void ath9k_htc_ps_wakeup(struct ath9k_htc_priv *priv);
+diff --git a/drivers/net/wireless/ath/ath9k/htc_drv_main.c b/drivers/net/wireless/ath/ath9k/htc_drv_main.c
+index 9a9b5212051a..76e1eaa15d35 100644
+--- a/drivers/net/wireless/ath/ath9k/htc_drv_main.c
++++ b/drivers/net/wireless/ath/ath9k/htc_drv_main.c
+@@ -995,7 +995,7 @@ static void ath9k_htc_stop(struct ieee80211_hw *hw)
+ 	WMI_CMD(WMI_DRAIN_TXQ_ALL_CMDID);
+ 	WMI_CMD(WMI_STOP_RECV_CMDID);
+ 
+-	tasklet_kill(&priv->rx_tasklet);
++	cancel_work_sync(&priv->rx_tasklet);
+ 
+ 	del_timer_sync(&priv->tx.cleanup_timer);
+ 	ath9k_htc_tx_drain(priv);
+diff --git a/drivers/net/wireless/ath/ath9k/htc_drv_txrx.c b/drivers/net/wireless/ath/ath9k/htc_drv_txrx.c
+index efcaeccb055a..2027a6af3d27 100644
+--- a/drivers/net/wireless/ath/ath9k/htc_drv_txrx.c
++++ b/drivers/net/wireless/ath/ath9k/htc_drv_txrx.c
+@@ -546,11 +546,11 @@ void ath9k_htc_tx_drain(struct ath9k_htc_priv *priv)
+ 
+ 	/*
+ 	 * Ensure that all pending TX frames are flushed,
+-	 * and that the TX completion/failed tasklets is killed.
++	 * and that the TX completion/failed works is killed.
+ 	 */
+ 	htc_stop(priv->htc);
+-	tasklet_kill(&priv->wmi->wmi_event_tasklet);
+-	tasklet_kill(&priv->tx_failed_tasklet);
++	cancel_work_sync(&priv->wmi->wmi_event_work);
++	cancel_work_sync(&priv->tx_failed_work);
+ 
+ 	ath9k_htc_tx_drainq(priv, &priv->tx.mgmt_ep_queue);
+ 	ath9k_htc_tx_drainq(priv, &priv->tx.cab_ep_queue);
+@@ -575,9 +575,9 @@ void ath9k_htc_tx_drain(struct ath9k_htc_priv *priv)
+ 	spin_unlock_bh(&priv->tx.tx_lock);
+ }
+ 
+-void ath9k_tx_failed_tasklet(struct tasklet_struct *t)
++void ath9k_tx_failed_work(struct tasklet_struct *t)
+ {
+-	struct ath9k_htc_priv *priv = from_tasklet(priv, t, tx_failed_tasklet);
++	struct ath9k_htc_priv *priv = from_work(priv, t, tx_failed_work);
+ 
+ 	spin_lock(&priv->tx.tx_lock);
+ 	if (priv->tx.flags & ATH9K_HTC_OP_TX_DRAIN) {
+@@ -700,7 +700,7 @@ void ath9k_htc_txep(void *drv_priv, struct sk_buff *skb,
+ 
+ 	if (!txok) {
+ 		skb_queue_tail(&priv->tx.tx_failed, skb);
+-		tasklet_schedule(&priv->tx_failed_tasklet);
++		queue_work(system_bh_wq, &priv->tx_failed_work);
+ 		return;
+ 	}
+ 
+@@ -815,7 +815,7 @@ int ath9k_tx_init(struct ath9k_htc_priv *priv)
+ 	skb_queue_head_init(&priv->tx.data_vo_queue);
+ 	skb_queue_head_init(&priv->tx.tx_failed);
+ 
+-	/* Allow ath9k_wmi_event_tasklet(WMI_TXSTATUS_EVENTID) to operate. */
++	/* Allow ath9k_wmi_event_work(WMI_TXSTATUS_EVENTID) to operate. */
+ 	smp_wmb();
+ 	priv->tx.initialized = true;
+ 
+@@ -1081,9 +1081,9 @@ static bool ath9k_rx_prepare(struct ath9k_htc_priv *priv,
+ /*
+  * FIXME: Handle FLUSH later on.
+  */
+-void ath9k_rx_tasklet(struct tasklet_struct *t)
++void ath9k_rx_work(struct tasklet_struct *t)
+ {
+-	struct ath9k_htc_priv *priv = from_tasklet(priv, t, rx_tasklet);
++	struct ath9k_htc_priv *priv = from_work(priv, t, rx_work);
+ 	struct ath9k_htc_rxbuf *rxbuf = NULL, *tmp_buf = NULL;
+ 	struct ieee80211_rx_status rx_status;
+ 	struct sk_buff *skb;
+@@ -1167,7 +1167,7 @@ void ath9k_htc_rxep(void *drv_priv, struct sk_buff *skb,
+ 	rxbuf->in_process = true;
+ 	spin_unlock_irqrestore(&priv->rx.rxbuflock, flags);
+ 
+-	tasklet_schedule(&priv->rx_tasklet);
++	queue_work(system_bh_wq, &priv->rx_work);
+ 	return;
+ err:
+ 	dev_kfree_skb_any(skb);
+diff --git a/drivers/net/wireless/ath/ath9k/main.c b/drivers/net/wireless/ath/ath9k/main.c
+index c48ff0ffbfef..71b000c4cea7 100644
+--- a/drivers/net/wireless/ath/ath9k/main.c
++++ b/drivers/net/wireless/ath/ath9k/main.c
+@@ -16,6 +16,7 @@
+ 
+ #include <linux/nl80211.h>
+ #include <linux/delay.h>
++#include <linux/workqueue.h>
+ #include "ath9k.h"
+ #include "btcoex.h"
+ 
+@@ -293,8 +294,8 @@ static int ath_reset_internal(struct ath_softc *sc, struct ath9k_channel *hchan)
+ 	__ath_cancel_work(sc);
+ 
+ 	disable_irq(sc->irq);
+-	tasklet_disable(&sc->intr_tq);
+-	tasklet_disable(&sc->bcon_tasklet);
++	disable_work_sync(&sc->intr_tq);
++	disable_work_sync(&sc->bcon_work);
+ 	spin_lock_bh(&sc->sc_pcu_lock);
+ 
+ 	if (!sc->cur_chan->offchannel) {
+@@ -346,8 +347,8 @@ static int ath_reset_internal(struct ath_softc *sc, struct ath9k_channel *hchan)
+ out:
+ 	enable_irq(sc->irq);
+ 	spin_unlock_bh(&sc->sc_pcu_lock);
+-	tasklet_enable(&sc->bcon_tasklet);
+-	tasklet_enable(&sc->intr_tq);
++	enable_and_queue_work(system_bh_wq, &sc->bcon_work);
++	enable_and_queue_work(system_bh_wq, &sc->intr_tq);
+ 
+ 	return r;
+ }
+@@ -376,9 +377,9 @@ static void ath_node_detach(struct ath_softc *sc, struct ieee80211_sta *sta)
+ 	ath_dynack_node_deinit(sc->sc_ah, an);
+ }
+ 
+-void ath9k_tasklet(struct tasklet_struct *t)
++void ath9k_work(struct tasklet_struct *t)
+ {
+-	struct ath_softc *sc = from_tasklet(sc, t, intr_tq);
++	struct ath_softc *sc = from_work(sc, t, intr_tq);
+ 	struct ath_hw *ah = sc->sc_ah;
+ 	struct ath_common *common = ath9k_hw_common(ah);
+ 	enum ath_reset_type type;
+@@ -451,9 +452,9 @@ void ath9k_tasklet(struct tasklet_struct *t)
+ 		/* Check for high priority Rx first */
+ 		if ((ah->caps.hw_caps & ATH9K_HW_CAP_EDMA) &&
+ 		    (status & ATH9K_INT_RXHP))
+-			ath_rx_tasklet(sc, 0, true);
++			ath_rx_work(sc, 0, true);
+ 
+-		ath_rx_tasklet(sc, 0, false);
++		ath_rx_work(sc, 0, false);
+ 	}
+ 
+ 	if (status & ATH9K_INT_TX) {
+@@ -466,9 +467,9 @@ void ath9k_tasklet(struct tasklet_struct *t)
+ 			 */
+ 			sc->gtt_cnt = 0;
+ 
+-			ath_tx_edma_tasklet(sc);
++			ath_tx_edma_work(sc);
+ 		} else {
+-			ath_tx_tasklet(sc);
++			ath_tx_work(sc);
+ 		}
+ 
+ 		wake_up(&sc->tx_wait);
+@@ -565,7 +566,7 @@ irqreturn_t ath_isr(int irq, void *dev)
+ 		goto chip_reset;
+ 
+ 	if (status & ATH9K_INT_SWBA)
+-		tasklet_schedule(&sc->bcon_tasklet);
++		queue_work(system_bh_wq, &sc->bcon_work);
+ 
+ 	if (status & ATH9K_INT_TXURN)
+ 		ath9k_hw_updatetxtriglevel(ah, true);
+@@ -595,7 +596,7 @@ irqreturn_t ath_isr(int irq, void *dev)
+ 	if (sched) {
+ 		/* turn off every interrupt */
+ 		ath9k_hw_kill_interrupts(ah);
+-		tasklet_schedule(&sc->intr_tq);
++		queue_work(system_bh_wq, &sc->intr_tq);
+ 	}
+ 
+ 	return IRQ_HANDLED;
+@@ -923,7 +924,7 @@ static void ath9k_stop(struct ieee80211_hw *hw)
+ 
+ 	spin_lock_bh(&sc->sc_pcu_lock);
+ 
+-	/* prevent tasklets to enable interrupts once we disable them */
++	/* prevent works to enable interrupts once we disable them */
+ 	ah->imask &= ~ATH9K_INT_GLOBAL;
+ 
+ 	/* make sure h/w will not generate any interrupt
+@@ -932,11 +933,11 @@ static void ath9k_stop(struct ieee80211_hw *hw)
+ 
+ 	spin_unlock_bh(&sc->sc_pcu_lock);
+ 
+-	/* we can now sync irq and kill any running tasklets, since we already
++	/* we can now sync irq and kill any running works, since we already
+ 	 * disabled interrupts and not holding a spin lock */
+ 	synchronize_irq(sc->irq);
+-	tasklet_kill(&sc->intr_tq);
+-	tasklet_kill(&sc->bcon_tasklet);
++	cancel_work_sync(&sc->intr_tq);
++	cancel_work_sync(&sc->bcon_work);
+ 
+ 	prev_idle = sc->ps_idle;
+ 	sc->ps_idle = true;
+@@ -2270,7 +2271,7 @@ static int ath9k_tx_last_beacon(struct ieee80211_hw *hw)
+ 	avp = (void *)vif->drv_priv;
+ 
+ 	if (!sc->beacon.tx_processed && !edma) {
+-		tasklet_disable(&sc->bcon_tasklet);
++		disable_work_sync(&sc->bcon_work);
+ 
+ 		bf = avp->av_bcbuf;
+ 		if (!bf || !bf->bf_mpdu)
+@@ -2284,7 +2285,7 @@ static int ath9k_tx_last_beacon(struct ieee80211_hw *hw)
+ 		sc->beacon.tx_last = !(ts.ts_status & ATH9K_TXERR_MASK);
+ 
+ skip:
+-		tasklet_enable(&sc->bcon_tasklet);
++		enable_and_queue_work(system_bh_wq, &sc->bcon_work);
+ 	}
+ 
+ 	return sc->beacon.tx_last;
+diff --git a/drivers/net/wireless/ath/ath9k/wmi.c b/drivers/net/wireless/ath/ath9k/wmi.c
+index 1476b42b52a9..dc8ae07f3971 100644
+--- a/drivers/net/wireless/ath/ath9k/wmi.c
++++ b/drivers/net/wireless/ath/ath9k/wmi.c
+@@ -106,7 +106,7 @@ struct wmi *ath9k_init_wmi(struct ath9k_htc_priv *priv)
+ 	mutex_init(&wmi->multi_rmw_mutex);
+ 	init_completion(&wmi->cmd_wait);
+ 	INIT_LIST_HEAD(&wmi->pending_tx_events);
+-	tasklet_setup(&wmi->wmi_event_tasklet, ath9k_wmi_event_tasklet);
++	INIT_WORK(&wmi->wmi_event_work, ath9k_wmi_event_work);
+ 
+ 	return wmi;
+ }
+@@ -129,15 +129,15 @@ void ath9k_wmi_event_drain(struct ath9k_htc_priv *priv)
+ {
+ 	unsigned long flags;
+ 
+-	tasklet_kill(&priv->wmi->wmi_event_tasklet);
++	cancel_work_sync(&priv->wmi->wmi_event_work);
+ 	spin_lock_irqsave(&priv->wmi->wmi_lock, flags);
+ 	__skb_queue_purge(&priv->wmi->wmi_event_queue);
+ 	spin_unlock_irqrestore(&priv->wmi->wmi_lock, flags);
+ }
+ 
+-void ath9k_wmi_event_tasklet(struct tasklet_struct *t)
++void ath9k_wmi_event_work(struct tasklet_struct *t)
+ {
+-	struct wmi *wmi = from_tasklet(wmi, t, wmi_event_tasklet);
++	struct wmi *wmi = from_work(wmi, t, wmi_event_work);
+ 	struct ath9k_htc_priv *priv = wmi->drv_priv;
+ 	struct wmi_cmd_hdr *hdr;
+ 	void *wmi_event;
+@@ -232,7 +232,7 @@ static void ath9k_wmi_ctrl_rx(void *priv, struct sk_buff *skb,
+ 		spin_lock_irqsave(&wmi->wmi_lock, flags);
+ 		__skb_queue_tail(&wmi->wmi_event_queue, skb);
+ 		spin_unlock_irqrestore(&wmi->wmi_lock, flags);
+-		tasklet_schedule(&wmi->wmi_event_tasklet);
++		queue_work(system_bh_wq, &wmi->wmi_event_work);
+ 		return;
+ 	}
+ 
+diff --git a/drivers/net/wireless/ath/ath9k/wmi.h b/drivers/net/wireless/ath/ath9k/wmi.h
+index 5c3b710b8f31..63d171dfca3d 100644
+--- a/drivers/net/wireless/ath/ath9k/wmi.h
++++ b/drivers/net/wireless/ath/ath9k/wmi.h
+@@ -153,7 +153,7 @@ struct wmi {
+ 	struct completion cmd_wait;
+ 	u16 last_seq_id;
+ 	struct sk_buff_head wmi_event_queue;
+-	struct tasklet_struct wmi_event_tasklet;
++	struct work_struct wmi_event_work;
+ 	u16 tx_seq_id;
+ 	u8 *cmd_rsp_buf;
+ 	u32 cmd_rsp_len;
+@@ -185,7 +185,7 @@ int ath9k_wmi_cmd(struct wmi *wmi, enum wmi_cmd_id cmd_id,
+ 		  u8 *cmd_buf, u32 cmd_len,
+ 		  u8 *rsp_buf, u32 rsp_len,
+ 		  u32 timeout);
+-void ath9k_wmi_event_tasklet(struct tasklet_struct *t);
++void ath9k_wmi_event_work(struct work_struct *t);
+ void ath9k_fatal_work(struct work_struct *work);
+ void ath9k_wmi_event_drain(struct ath9k_htc_priv *priv);
+ void ath9k_stop_wmi(struct ath9k_htc_priv *priv);
+diff --git a/drivers/net/wireless/ath/ath9k/wow.c b/drivers/net/wireless/ath/ath9k/wow.c
+index 8d0b1730a9d5..9c74978747cc 100644
+--- a/drivers/net/wireless/ath/ath9k/wow.c
++++ b/drivers/net/wireless/ath/ath9k/wow.c
+@@ -260,11 +260,11 @@ int ath9k_suspend(struct ieee80211_hw *hw,
+ 	spin_unlock_bh(&sc->sc_pcu_lock);
+ 
+ 	/*
+-	 * we can now sync irq and kill any running tasklets, since we already
++	 * we can now sync irq and kill any running works, since we already
+ 	 * disabled interrupts and not holding a spin lock
+ 	 */
+ 	synchronize_irq(sc->irq);
+-	tasklet_kill(&sc->intr_tq);
++	cancel_work_sync(&sc->intr_tq);
+ 
+ 	ath9k_hw_wow_enable(ah, triggers);
+ 
+diff --git a/drivers/net/wireless/ath/carl9170/carl9170.h b/drivers/net/wireless/ath/carl9170/carl9170.h
+index ba29b4aebe9f..94215ce94c0e 100644
+--- a/drivers/net/wireless/ath/carl9170/carl9170.h
++++ b/drivers/net/wireless/ath/carl9170/carl9170.h
+@@ -52,6 +52,7 @@
+ #endif /* CONFIG_CARL9170_LEDS */
+ #ifdef CONFIG_CARL9170_WPC
+ #include <linux/input.h>
++#include <linux/workqueue.h>
+ #endif /* CONFIG_CARL9170_WPC */
+ #include "eeprom.h"
+ #include "wlan.h"
+@@ -252,7 +253,7 @@ struct ar9170 {
+ 	struct usb_anchor tx_anch;
+ 	struct usb_anchor tx_cmd;
+ 	struct usb_anchor tx_err;
+-	struct tasklet_struct usb_tasklet;
++	struct work_struct usb_work;
+ 	atomic_t tx_cmd_urbs;
+ 	atomic_t tx_anch_urbs;
+ 	atomic_t rx_anch_urbs;
+diff --git a/drivers/net/wireless/ath/carl9170/usb.c b/drivers/net/wireless/ath/carl9170/usb.c
+index c4edf8355941..661a7c0bd48d 100644
+--- a/drivers/net/wireless/ath/carl9170/usb.c
++++ b/drivers/net/wireless/ath/carl9170/usb.c
+@@ -43,6 +43,7 @@
+ #include <linux/firmware.h>
+ #include <linux/etherdevice.h>
+ #include <linux/device.h>
++#include <linux/workqueue.h>
+ #include <net/mac80211.h>
+ #include "carl9170.h"
+ #include "cmd.h"
+@@ -187,7 +188,7 @@ static void carl9170_usb_tx_data_complete(struct urb *urb)
+ 	case -ENODEV:
+ 	case -ESHUTDOWN:
+ 		/*
+-		 * Defer the frame clean-up to the tasklet worker.
++		 * Defer the frame clean-up to the work worker.
+ 		 * This is necessary, because carl9170_tx_drop
+ 		 * does not work in an irqsave context.
+ 		 */
+@@ -377,9 +378,9 @@ void carl9170_usb_handle_tx_err(struct ar9170 *ar)
+ 	}
+ }
+ 
+-static void carl9170_usb_tasklet(struct tasklet_struct *t)
++static void carl9170_usb_work(struct work_struct *t)
+ {
+-	struct ar9170 *ar = from_tasklet(ar, t, usb_tasklet);
++	struct ar9170 *ar = from_work(ar, t, usb_work);
+ 
+ 	if (!IS_INITIALIZED(ar))
+ 		return;
+@@ -431,10 +432,10 @@ static void carl9170_usb_rx_complete(struct urb *urb)
+ 		/*
+ 		 * usb_submit_rx_urb reported a problem.
+ 		 * In case this is due to a rx buffer shortage,
+-		 * elevate the tasklet worker priority to
++		 * elevate the work worker priority to
+ 		 * the highest available level.
+ 		 */
+-		tasklet_hi_schedule(&ar->usb_tasklet);
++		queue_work(system_bh_highpri_wq, &ar->usb_work);
+ 
+ 		if (atomic_read(&ar->rx_anch_urbs) == 0) {
+ 			/*
+@@ -452,7 +453,7 @@ static void carl9170_usb_rx_complete(struct urb *urb)
+ 		 * Using anything less than _high_ priority absolutely
+ 		 * kills the rx performance my UP-System...
+ 		 */
+-		tasklet_hi_schedule(&ar->usb_tasklet);
++		queue_work(system_bh_highpri_wq, &ar->usb_work);
+ 	}
+ }
+ 
+@@ -594,7 +595,7 @@ static void carl9170_usb_cancel_urbs(struct ar9170 *ar)
+ 	carl9170_usb_handle_tx_err(ar);
+ 	usb_poison_anchored_urbs(&ar->rx_anch);
+ 
+-	tasklet_kill(&ar->usb_tasklet);
++	cancel_work_sync(&ar->usb_work);
+ 
+ 	usb_scuttle_anchored_urbs(&ar->rx_work);
+ 	usb_scuttle_anchored_urbs(&ar->rx_pool);
+@@ -885,7 +886,7 @@ int carl9170_usb_restart(struct ar9170 *ar)
+ 	if (err)
+ 		goto err_out;
+ 
+-	tasklet_schedule(&ar->usb_tasklet);
++	queue_work(system_bh_wq, &ar->usb_work);
+ 
+ 	/* The reboot procedure can take quite a while to complete. */
+ 	msleep(1100);
+@@ -1082,7 +1083,7 @@ static int carl9170_usb_probe(struct usb_interface *intf,
+ 	init_completion(&ar->cmd_wait);
+ 	init_completion(&ar->fw_boot_wait);
+ 	init_completion(&ar->fw_load_wait);
+-	tasklet_setup(&ar->usb_tasklet, carl9170_usb_tasklet);
++	INIT_WORK(&ar->usb_work, carl9170_usb_work);
+ 
+ 	atomic_set(&ar->tx_cmd_urbs, 0);
+ 	atomic_set(&ar->tx_anch_urbs, 0);
+diff --git a/drivers/net/wireless/atmel/at76c50x-usb.c b/drivers/net/wireless/atmel/at76c50x-usb.c
+index 447b51cff8f9..c8453567615c 100644
+--- a/drivers/net/wireless/atmel/at76c50x-usb.c
++++ b/drivers/net/wireless/atmel/at76c50x-usb.c
+@@ -38,6 +38,7 @@
+ #include <net/ieee80211_radiotap.h>
+ #include <linux/firmware.h>
+ #include <linux/leds.h>
++#include <linux/workqueue.h>
+ #include <net/mac80211.h>
+ 
+ #include "at76c50x-usb.h"
+@@ -1199,7 +1200,7 @@ static void at76_rx_callback(struct urb *urb)
+ {
+ 	struct at76_priv *priv = urb->context;
+ 
+-	tasklet_schedule(&priv->rx_tasklet);
++	queue_work(system_bh_wq, &priv->rx_work);
+ }
+ 
+ static int at76_submit_rx_urb(struct at76_priv *priv)
+@@ -1544,9 +1545,9 @@ static inline int at76_guess_freq(struct at76_priv *priv)
+ 	return ieee80211_channel_to_frequency(channel, NL80211_BAND_2GHZ);
+ }
+ 
+-static void at76_rx_tasklet(struct tasklet_struct *t)
++static void at76_rx_work(struct work_struct *t)
+ {
+-	struct at76_priv *priv = from_tasklet(priv, t, rx_tasklet);
++	struct at76_priv *priv = from_work(priv, t, rx_work);
+ 	struct urb *urb = priv->rx_urb;
+ 	struct at76_rx_buffer *buf;
+ 	struct ieee80211_rx_status rx_status = { 0 };
+@@ -2215,7 +2216,7 @@ static struct at76_priv *at76_alloc_new_device(struct usb_device *udev)
+ 	INIT_WORK(&priv->work_join_bssid, at76_work_join_bssid);
+ 	INIT_DELAYED_WORK(&priv->dwork_hw_scan, at76_dwork_hw_scan);
+ 
+-	tasklet_setup(&priv->rx_tasklet, at76_rx_tasklet);
++	INIT_WORK(&priv->rx_work, at76_rx_work);
+ 
+ 	priv->pm_mode = AT76_PM_OFF;
+ 	priv->pm_period = 0;
+@@ -2401,7 +2402,7 @@ static void at76_delete_device(struct at76_priv *priv)
+ 	/* The device is gone, don't bother turning it off */
+ 	priv->device_unplugged = 1;
+ 
+-	tasklet_kill(&priv->rx_tasklet);
++	cancel_work_sync(&priv->rx_work);
+ 
+ 	if (priv->mac80211_registered)
+ 		ieee80211_unregister_hw(priv->hw);
+diff --git a/drivers/net/wireless/atmel/at76c50x-usb.h b/drivers/net/wireless/atmel/at76c50x-usb.h
+index 746e64dfd8aa..9f29173ecd8e 100644
+--- a/drivers/net/wireless/atmel/at76c50x-usb.h
++++ b/drivers/net/wireless/atmel/at76c50x-usb.h
+@@ -387,7 +387,7 @@ struct at76_priv {
+ 	struct work_struct work_join_bssid;
+ 	struct delayed_work dwork_hw_scan;
+ 
+-	struct tasklet_struct rx_tasklet;
++	struct work_struct rx_work;
+ 
+ 	/* the WEP stuff */
+ 	int wep_enabled;	/* 1 if WEP is enabled */
+diff --git a/drivers/net/wireless/broadcom/b43legacy/b43legacy.h b/drivers/net/wireless/broadcom/b43legacy/b43legacy.h
+index f49365d14619..db289b9270f1 100644
+--- a/drivers/net/wireless/broadcom/b43legacy/b43legacy.h
++++ b/drivers/net/wireless/broadcom/b43legacy/b43legacy.h
+@@ -15,6 +15,7 @@
+ #include <linux/ssb/ssb.h>
+ #include <linux/ssb/ssb_driver_chipcommon.h>
+ #include <linux/completion.h>
++#include <linux/workqueue.h>
+ 
+ #include <net/mac80211.h>
+ 
+@@ -670,7 +671,7 @@ enum {
+  *
+  * You should always acquire both, wl->mutex and wl->irq_lock unless:
+  * - You don't need to acquire wl->irq_lock, if the interface is stopped.
+- * - You don't need to acquire wl->mutex in the IRQ handler, IRQ tasklet
++ * - You don't need to acquire wl->mutex in the IRQ handler, IRQ work
+  *   and packet TX path (and _ONLY_ there.)
+  */
+ 
+@@ -719,8 +720,8 @@ struct b43legacy_wldev {
+ 	/* if > 0 MAC is suspended. if == 0 MAC is enabled. */
+ 	int mac_suspended;
+ 
+-	/* Interrupt Service Routine tasklet (bottom-half) */
+-	struct tasklet_struct isr_tasklet;
++	/* Interrupt Service Routine work (bottom-half) */
++	struct work_struct isr_work;
+ 
+ 	/* Periodic tasks */
+ 	struct delayed_work periodic_work;
+diff --git a/drivers/net/wireless/broadcom/b43legacy/main.c b/drivers/net/wireless/broadcom/b43legacy/main.c
+index 760136638a95..9ba079678f6b 100644
+--- a/drivers/net/wireless/broadcom/b43legacy/main.c
++++ b/drivers/net/wireless/broadcom/b43legacy/main.c
+@@ -26,6 +26,7 @@
+ #include <linux/skbuff.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/slab.h>
++#include <linux/workqueue.h>
+ #include <net/dst.h>
+ #include <asm/unaligned.h>
+ 
+@@ -587,7 +588,7 @@ static void b43legacy_short_slot_timing_disable(struct b43legacy_wldev *dev)
+ static void b43legacy_synchronize_irq(struct b43legacy_wldev *dev)
+ {
+ 	synchronize_irq(dev->dev->irq);
+-	tasklet_kill(&dev->isr_tasklet);
++	cancel_work_sync(&dev->isr_work);
+ }
+ 
+ /* DummyTransmission function, as documented on
+@@ -1275,9 +1276,9 @@ static void handle_irq_ucode_debug(struct b43legacy_wldev *dev)
+ }
+ 
+ /* Interrupt handler bottom-half */
+-static void b43legacy_interrupt_tasklet(struct tasklet_struct *t)
++static void b43legacy_interrupt_work(struct work_struct *t)
+ {
+-	struct b43legacy_wldev *dev = from_tasklet(dev, t, isr_tasklet);
++	struct b43legacy_wldev *dev = from_work(dev, t, isr_work);
+ 	u32 reason;
+ 	u32 dma_reason[ARRAY_SIZE(dev->dma_reason)];
+ 	u32 merged_dma_reason = 0;
+@@ -1457,7 +1458,7 @@ static irqreturn_t b43legacy_interrupt_handler(int irq, void *dev_id)
+ 	b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, 0);
+ 	/* Save the reason code and call our bottom half. */
+ 	dev->irq_reason = reason;
+-	tasklet_schedule(&dev->isr_tasklet);
++	queue_work(system_bh_wq, &dev->isr_work);
+ out:
+ 	spin_unlock(&dev->wl->irq_lock);
+ 
+@@ -3743,7 +3744,7 @@ static int b43legacy_one_core_attach(struct ssb_device *dev,
+ 	wldev->wl = wl;
+ 	b43legacy_set_status(wldev, B43legacy_STAT_UNINIT);
+ 	wldev->bad_frames_preempt = modparam_bad_frames_preempt;
+-	tasklet_setup(&wldev->isr_tasklet, b43legacy_interrupt_tasklet);
++	INIT_WORK(&wldev->isr_work, b43legacy_interrupt_work);
+ 	if (modparam_pio)
+ 		wldev->__using_pio = true;
+ 	INIT_LIST_HEAD(&wldev->list);
+diff --git a/drivers/net/wireless/broadcom/b43legacy/pio.c b/drivers/net/wireless/broadcom/b43legacy/pio.c
+index aac413d0f629..8e86ae36668e 100644
+--- a/drivers/net/wireless/broadcom/b43legacy/pio.c
++++ b/drivers/net/wireless/broadcom/b43legacy/pio.c
+@@ -17,6 +17,7 @@
+ 
+ #include <linux/delay.h>
+ #include <linux/slab.h>
++#include <linux/workqueue.h>
+ 
+ 
+ static void tx_start(struct b43legacy_pioqueue *queue)
+@@ -233,7 +234,7 @@ static int pio_tx_packet(struct b43legacy_pio_txpacket *packet)
+ 			  B43legacy_PIO_MAXTXDEVQPACKETS);
+ 	B43legacy_WARN_ON(queue->tx_devq_used > queue->tx_devq_size);
+ 	/* Check if there is sufficient free space on the device
+-	 * TX queue. If not, return and let the TX tasklet
++	 * TX queue. If not, return and let the TX work
+ 	 * retry later.
+ 	 */
+ 	if (queue->tx_devq_packets == B43legacy_PIO_MAXTXDEVQPACKETS)
+@@ -264,9 +265,9 @@ static int pio_tx_packet(struct b43legacy_pio_txpacket *packet)
+ 	return 0;
+ }
+ 
+-static void tx_tasklet(struct tasklet_struct *t)
++static void tx_work(struct work_struct *t)
+ {
+-	struct b43legacy_pioqueue *queue = from_tasklet(queue, t, txtask);
++	struct b43legacy_pioqueue *queue = from_work(queue, t, txtask);
+ 	struct b43legacy_wldev *dev = queue->dev;
+ 	unsigned long flags;
+ 	struct b43legacy_pio_txpacket *packet, *tmp_packet;
+@@ -331,7 +332,7 @@ struct b43legacy_pioqueue *b43legacy_setup_pioqueue(struct b43legacy_wldev *dev,
+ 	INIT_LIST_HEAD(&queue->txfree);
+ 	INIT_LIST_HEAD(&queue->txqueue);
+ 	INIT_LIST_HEAD(&queue->txrunning);
+-	tasklet_setup(&queue->txtask, tx_tasklet);
++	INIT_WORK(&queue->txtask, tx_work);
+ 
+ 	value = b43legacy_read32(dev, B43legacy_MMIO_MACCTL);
+ 	value &= ~B43legacy_MACCTL_BE;
+@@ -368,7 +369,7 @@ static void cancel_transfers(struct b43legacy_pioqueue *queue)
+ {
+ 	struct b43legacy_pio_txpacket *packet, *tmp_packet;
+ 
+-	tasklet_kill(&queue->txtask);
++	cancel_work_sync(&queue->txtask);
+ 
+ 	list_for_each_entry_safe(packet, tmp_packet, &queue->txrunning, list)
+ 		free_txpacket(packet, 0);
+@@ -466,7 +467,7 @@ int b43legacy_pio_tx(struct b43legacy_wldev *dev,
+ 	queue->nr_txfree--;
+ 	B43legacy_WARN_ON(queue->nr_txfree >= B43legacy_PIO_MAXTXPACKETS);
+ 
+-	tasklet_schedule(&queue->txtask);
++	queue_work(system_bh_wq, &queue->txtask);
+ 
+ 	return 0;
+ }
+@@ -525,11 +526,11 @@ void b43legacy_pio_handle_txstatus(struct b43legacy_wldev *dev,
+ 	packet->skb = NULL;
+ 
+ 	free_txpacket(packet, 1);
+-	/* If there are packets on the txqueue, poke the tasklet
++	/* If there are packets on the txqueue, poke the work
+ 	 * to transmit them.
+ 	 */
+ 	if (!list_empty(&queue->txqueue))
+-		tasklet_schedule(&queue->txtask);
++		queue_work(system_bh_wq, &queue->txtask);
+ }
+ 
+ static void pio_rx_error(struct b43legacy_pioqueue *queue,
+@@ -645,7 +646,7 @@ void b43legacy_pio_tx_resume(struct b43legacy_pioqueue *queue)
+ 			    b43legacy_pio_read(queue, B43legacy_PIO_TXCTL)
+ 			    & ~B43legacy_PIO_TXCTL_SUSPEND);
+ 	b43legacy_power_saving_ctl_bits(queue->dev, -1, -1);
+-	tasklet_schedule(&queue->txtask);
++	queue_work(system_bh_wq, &queue->txtask);
+ }
+ 
+ void b43legacy_pio_freeze_txqueues(struct b43legacy_wldev *dev)
+@@ -671,11 +672,11 @@ void b43legacy_pio_thaw_txqueues(struct b43legacy_wldev *dev)
+ 	pio->queue2->tx_frozen = 0;
+ 	pio->queue3->tx_frozen = 0;
+ 	if (!list_empty(&pio->queue0->txqueue))
+-		tasklet_schedule(&pio->queue0->txtask);
++		queue_work(system_bh_wq, &pio->queue0->txtask);
+ 	if (!list_empty(&pio->queue1->txqueue))
+-		tasklet_schedule(&pio->queue1->txtask);
++		queue_work(system_bh_wq, &pio->queue1->txtask);
+ 	if (!list_empty(&pio->queue2->txqueue))
+-		tasklet_schedule(&pio->queue2->txtask);
++		queue_work(system_bh_wq, &pio->queue2->txtask);
+ 	if (!list_empty(&pio->queue3->txqueue))
+-		tasklet_schedule(&pio->queue3->txtask);
++		queue_work(system_bh_wq, &pio->queue3->txtask);
+ }
+diff --git a/drivers/net/wireless/broadcom/b43legacy/pio.h b/drivers/net/wireless/broadcom/b43legacy/pio.h
+index 08cd02282beb..413a709fce06 100644
+--- a/drivers/net/wireless/broadcom/b43legacy/pio.h
++++ b/drivers/net/wireless/broadcom/b43legacy/pio.h
+@@ -7,6 +7,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/list.h>
+ #include <linux/skbuff.h>
++#include <linux/workqueue.h>
+ 
+ 
+ #define B43legacy_PIO_TXCTL		0x00
+@@ -75,7 +76,7 @@ struct b43legacy_pioqueue {
+ 	 * posted to the device. We are waiting for the txstatus.
+ 	 */
+ 	struct list_head txrunning;
+-	struct tasklet_struct txtask;
++	struct work_struct txtask;
+ 	struct b43legacy_pio_txpacket
+ 			 tx_packets_cache[B43legacy_PIO_MAXTXPACKETS];
+ };
+@@ -107,7 +108,7 @@ void b43legacy_pio_rx(struct b43legacy_pioqueue *queue);
+ /* Suspend TX queue in hardware. */
+ void b43legacy_pio_tx_suspend(struct b43legacy_pioqueue *queue);
+ void b43legacy_pio_tx_resume(struct b43legacy_pioqueue *queue);
+-/* Suspend (freeze) the TX tasklet (software level). */
++/* Suspend (freeze) the TX work (software level). */
+ void b43legacy_pio_freeze_txqueues(struct b43legacy_wldev *dev);
+ void b43legacy_pio_thaw_txqueues(struct b43legacy_wldev *dev);
+ 
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.c b/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.c
+index 543e93ec49d2..8cbebea181b1 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.c
+@@ -24,6 +24,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
+ #include <linux/bcma/bcma.h>
++#include <linux/workqueue.h>
+ #include <net/mac80211.h>
+ #include <defs.h>
+ #include "phy/phy_int.h"
+@@ -293,7 +294,7 @@ static void brcms_free(struct brcms_info *wl)
+ 		free_irq(wl->irq, wl);
+ 
+ 	/* kill dpc */
+-	tasklet_kill(&wl->tasklet);
++	cancel_work_sync(&wl->work);
+ 
+ 	if (wl->pub) {
+ 		brcms_debugfs_detach(wl->pub);
+@@ -984,7 +985,7 @@ void brcms_dpc(struct tasklet_struct *t)
+ {
+ 	struct brcms_info *wl;
+ 
+-	wl = from_tasklet(wl, t, tasklet);
++	wl = from_work(wl, t, work);
+ 
+ 	spin_lock_bh(&wl->lock);
+ 
+@@ -1007,7 +1008,7 @@ void brcms_dpc(struct tasklet_struct *t)
+ 
+ 	/* re-schedule dpc */
+ 	if (wl->resched)
+-		tasklet_schedule(&wl->tasklet);
++		queue_work(system_bh_wq, &wl->work);
+ 	else
+ 		/* re-enable interrupts */
+ 		brcms_intrson(wl);
+@@ -1029,7 +1030,7 @@ static irqreturn_t brcms_isr(int irq, void *dev_id)
+ 	/* call common first level interrupt handler */
+ 	if (brcms_c_isr(wl->wlc)) {
+ 		/* schedule second level handler */
+-		tasklet_schedule(&wl->tasklet);
++		queue_work(system_bh_wq, &wl->work);
+ 		ret = IRQ_HANDLED;
+ 	}
+ 
+@@ -1145,7 +1146,7 @@ static struct brcms_info *brcms_attach(struct bcma_device *pdev)
+ 	init_waitqueue_head(&wl->tx_flush_wq);
+ 
+ 	/* setup the bottom half handler */
+-	tasklet_setup(&wl->tasklet, brcms_dpc);
++	INIT_WORK(&wl->work, brcms_dpc);
+ 
+ 	spin_lock_init(&wl->lock);
+ 	spin_lock_init(&wl->isr_lock);
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.h b/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.h
+index eaf926a96a88..aa8c22c56671 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmsmac/mac80211_if.h
+@@ -21,6 +21,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/workqueue.h>
+ #include <linux/leds.h>
++#include <linux/workqueue.h>
+ 
+ #include "ucode_loader.h"
+ #include "led.h"
+@@ -77,7 +78,7 @@ struct brcms_info {
+ 	atomic_t callbacks;	/* # outstanding callback functions */
+ 	struct brcms_timer *timers;	/* timer cleanup queue */
+ 
+-	struct tasklet_struct tasklet;	/* dpc tasklet */
++	struct work_struct work;	/* dpc work */
+ 	bool resched;		/* dpc needs to be and is rescheduled */
+ 	struct brcms_firmware fw;
+ 	struct wiphy *wiphy;
+@@ -106,7 +107,7 @@ struct brcms_timer *brcms_init_timer(struct brcms_info *wl,
+ void brcms_free_timer(struct brcms_timer *timer);
+ void brcms_add_timer(struct brcms_timer *timer, uint ms, int periodic);
+ bool brcms_del_timer(struct brcms_timer *timer);
+-void brcms_dpc(struct tasklet_struct *t);
++void brcms_dpc(struct work_struct *t);
+ void brcms_timer(struct brcms_timer *t);
+ void brcms_fatal_error(struct brcms_info *wl);
+ 
+diff --git a/drivers/net/wireless/intel/ipw2x00/ipw2100.c b/drivers/net/wireless/intel/ipw2x00/ipw2100.c
+index b6636002c7d2..83cb8062c1ad 100644
+--- a/drivers/net/wireless/intel/ipw2x00/ipw2100.c
++++ b/drivers/net/wireless/intel/ipw2x00/ipw2100.c
+@@ -183,6 +183,7 @@ static struct ipw2100_fw ipw2100_firmware;
+ #endif
+ 
+ #include <linux/moduleparam.h>
++#include <linux/workqueue.h>
+ module_param(debug, int, 0444);
+ module_param_named(mode, network_mode, int, 0444);
+ module_param(channel, int, 0444);
+@@ -1983,7 +1984,7 @@ static void isr_indicate_associated(struct ipw2100_priv *priv, u32 status)
+ 	 * TBD: BSSID is usually 00:00:00:00:00:00 here and not
+ 	 *      an actual MAC of the AP. Seems like FW sets this
+ 	 *      address too late. Read it later and expose through
+-	 *      /proc or schedule a later task to query and update
++	 *      /proc or schedule a later work to query and update
+ 	 */
+ 
+ 	essid_len = IW_ESSID_MAX_SIZE;
+@@ -3190,9 +3191,9 @@ static void ipw2100_tx_send_data(struct ipw2100_priv *priv)
+ 	}
+ }
+ 
+-static void ipw2100_irq_tasklet(struct tasklet_struct *t)
++static void ipw2100_irq_work(struct work_struct *t)
+ {
+-	struct ipw2100_priv *priv = from_tasklet(priv, t, irq_tasklet);
++	struct ipw2100_priv *priv = from_work(priv, t, irq_work);
+ 	struct net_device *dev = priv->net_dev;
+ 	unsigned long flags;
+ 	u32 inta, tmp;
+@@ -3349,11 +3350,11 @@ static irqreturn_t ipw2100_interrupt(int irq, void *data)
+ 
+ 	/* We disable the hardware interrupt here just to prevent unneeded
+ 	 * calls to be made.  We disable this again within the actual
+-	 * work tasklet, so if another part of the code re-enables the
++	 * work work, so if another part of the code re-enables the
+ 	 * interrupt, that is fine */
+ 	ipw2100_disable_interrupts(priv);
+ 
+-	tasklet_schedule(&priv->irq_tasklet);
++	queue_work(system_bh_wq, &priv->irq_work);
+ 	spin_unlock(&priv->low_lock);
+ 
+ 	return IRQ_HANDLED;
+@@ -5988,7 +5989,7 @@ static void ipw2100_rf_kill(struct work_struct *work)
+ 	spin_unlock_irqrestore(&priv->low_lock, flags);
+ }
+ 
+-static void ipw2100_irq_tasklet(struct tasklet_struct *t);
++static void ipw2100_irq_work(struct work_struct *t);
+ 
+ static const struct net_device_ops ipw2100_netdev_ops = {
+ 	.ndo_open		= ipw2100_open,
+@@ -6118,7 +6119,7 @@ static struct net_device *ipw2100_alloc_device(struct pci_dev *pci_dev,
+ 	INIT_DELAYED_WORK(&priv->rf_kill, ipw2100_rf_kill);
+ 	INIT_DELAYED_WORK(&priv->scan_event, ipw2100_scan_event);
+ 
+-	tasklet_setup(&priv->irq_tasklet, ipw2100_irq_tasklet);
++	INIT_WORK(&priv->irq_work, ipw2100_irq_work);
+ 
+ 	/* NOTE:  We do not start the deferred work for status checks yet */
+ 	priv->stop_rf_kill = 1;
+diff --git a/drivers/net/wireless/intel/ipw2x00/ipw2100.h b/drivers/net/wireless/intel/ipw2x00/ipw2100.h
+index b34085ade3aa..54fe11216fde 100644
+--- a/drivers/net/wireless/intel/ipw2x00/ipw2100.h
++++ b/drivers/net/wireless/intel/ipw2x00/ipw2100.h
+@@ -31,6 +31,7 @@
+ 
+ #include <linux/workqueue.h>
+ #include <linux/mutex.h>
++#include <linux/workqueue.h>
+ 
+ #include "libipw.h"
+ 
+@@ -556,7 +557,7 @@ struct ipw2100_priv {
+ 
+ 	struct iw_public_data wireless_data;
+ 
+-	struct tasklet_struct irq_tasklet;
++	struct work_struct irq_work;
+ 
+ 	struct delayed_work reset_work;
+ 	struct delayed_work security_work;
+diff --git a/drivers/net/wireless/intel/ipw2x00/ipw2200.c b/drivers/net/wireless/intel/ipw2x00/ipw2200.c
+index eed9ef17bc29..8dca295e20fa 100644
+--- a/drivers/net/wireless/intel/ipw2x00/ipw2200.c
++++ b/drivers/net/wireless/intel/ipw2x00/ipw2200.c
+@@ -18,6 +18,7 @@
+ 
+ #include <linux/sched.h>
+ #include <linux/slab.h>
++#include <linux/workqueue.h>
+ #include <net/cfg80211-wext.h>
+ #include "ipw2200.h"
+ #include "ipw.h"
+@@ -1913,9 +1914,9 @@ static void notify_wx_assoc_event(struct ipw_priv *priv)
+ 	wireless_send_event(priv->net_dev, SIOCGIWAP, &wrqu, NULL);
+ }
+ 
+-static void ipw_irq_tasklet(struct tasklet_struct *t)
++static void ipw_irq_work(struct work_struct *t)
+ {
+-	struct ipw_priv *priv = from_tasklet(priv, t, irq_tasklet);
++	struct ipw_priv *priv = from_work(priv, t, irq_work);
+ 	u32 inta, inta_mask, handled = 0;
+ 	unsigned long flags;
+ 
+@@ -5054,7 +5055,7 @@ static int ipw_queue_tx_hcmd(struct ipw_priv *priv, int hcmd, const void *buf,
+  *   'processed' and 'read' driver indexes as well)
+  * + A received packet is processed and handed to the kernel network stack,
+  *   detached from the ipw->rxq.  The driver 'processed' index is updated.
+- * + The Host/Firmware ipw->rxq is replenished at tasklet time from the rx_free
++ * + The Host/Firmware ipw->rxq is replenished at work time from the rx_free
+  *   list. If there are no allocated buffers in ipw->rxq->rx_free, the READ
+  *   INDEX is not incremented and ipw->status(RX_STALLED) is set.  If there
+  *   were enough free buffers and RX_STALLED is set it is cleared.
+@@ -10474,10 +10475,10 @@ static irqreturn_t ipw_isr(int irq, void *data)
+ 	inta &= (IPW_INTA_MASK_ALL & inta_mask);
+ 	ipw_write32(priv, IPW_INTA_RW, inta);
+ 
+-	/* Cache INTA value for our tasklet */
++	/* Cache INTA value for our work */
+ 	priv->isr_inta = inta;
+ 
+-	tasklet_schedule(&priv->irq_tasklet);
++	queue_work(system_bh_wq, &priv->irq_work);
+ 
+ 	spin_unlock(&priv->irq_lock);
+ 
+@@ -10621,7 +10622,7 @@ static void ipw_setup_deferred_work(struct ipw_priv *priv)
+ 	INIT_WORK(&priv->qos_activate, ipw_bg_qos_activate);
+ #endif				/* CONFIG_IPW2200_QOS */
+ 
+-	tasklet_setup(&priv->irq_tasklet, ipw_irq_tasklet);
++	INIT_WORK(&priv->irq_work, ipw_irq_work);
+ }
+ 
+ static void shim__set_security(struct net_device *dev,
+diff --git a/drivers/net/wireless/intel/ipw2x00/ipw2200.h b/drivers/net/wireless/intel/ipw2x00/ipw2200.h
+index 8ebf09121e17..2ae17377f082 100644
+--- a/drivers/net/wireless/intel/ipw2x00/ipw2200.h
++++ b/drivers/net/wireless/intel/ipw2x00/ipw2200.h
+@@ -1302,7 +1302,7 @@ struct ipw_priv {
+ 	struct work_struct link_up;
+ 	struct work_struct link_down;
+ 
+-	struct tasklet_struct irq_tasklet;
++	struct work_struct irq_work;
+ 
+ 	/* LED related variables and work_struct */
+ 	u8 nic_type;
+@@ -1340,7 +1340,7 @@ struct ipw_priv {
+ 
+ 	/* network state */
+ 
+-	/* Used to pass the current INTA value from ISR to Tasklet */
++	/* Used to pass the current INTA value from ISR to Work */
+ 	u32 isr_inta;
+ 
+ 	/* QoS */
+@@ -1481,6 +1481,7 @@ do { if (ipw_debug_level & (level)) \
+ #define IPW_DEBUG_QOS(f, a...)   IPW_LL_DEBUG(IPW_DL_QOS, f, ## a)
+ 
+ #include <linux/ctype.h>
++#include <linux/workqueue.h>
+ 
+ /*
+ * Register bit definitions
+diff --git a/drivers/net/wireless/intel/iwlegacy/3945-mac.c b/drivers/net/wireless/intel/iwlegacy/3945-mac.c
+index 9eaf5ec133f9..796405c9cf4d 100644
+--- a/drivers/net/wireless/intel/iwlegacy/3945-mac.c
++++ b/drivers/net/wireless/intel/iwlegacy/3945-mac.c
+@@ -27,6 +27,7 @@
+ #include <linux/firmware.h>
+ #include <linux/etherdevice.h>
+ #include <linux/if_arp.h>
++#include <linux/workqueue.h>
+ 
+ #include <net/ieee80211_radiotap.h>
+ #include <net/mac80211.h>
+@@ -878,7 +879,7 @@ il3945_setup_handlers(struct il_priv *il)
+  *   'processed' and 'read' driver idxes as well)
+  * + A received packet is processed and handed to the kernel network stack,
+  *   detached from the iwl->rxq.  The driver 'processed' idx is updated.
+- * + The Host/Firmware iwl->rxq is replenished at tasklet time from the rx_free
++ * + The Host/Firmware iwl->rxq is replenished at work time from the rx_free
+  *   list. If there are no allocated buffers in iwl->rxq->rx_free, the READ
+  *   IDX is not incremented and iwl->status(RX_STALLED) is set.  If there
+  *   were enough free buffers and RX_STALLED is set it is cleared.
+@@ -1292,13 +1293,13 @@ il3945_rx_handle(struct il_priv *il)
+ 		il3945_rx_queue_restock(il);
+ }
+ 
+-/* call this function to flush any scheduled tasklet */
++/* call this function to flush any scheduled work */
+ static inline void
+ il3945_synchronize_irq(struct il_priv *il)
+ {
+-	/* wait to make sure we flush pending tasklet */
++	/* wait to make sure we flush pending work */
+ 	synchronize_irq(il->pci_dev->irq);
+-	tasklet_kill(&il->irq_tasklet);
++	cancel_work_sync(&il->irq_work);
+ }
+ 
+ static const char *
+@@ -1366,9 +1367,9 @@ il3945_dump_nic_error_log(struct il_priv *il)
+ }
+ 
+ static void
+-il3945_irq_tasklet(struct tasklet_struct *t)
++il3945_irq_work(struct tasklet_struct *t)
+ {
+-	struct il_priv *il = from_tasklet(il, t, irq_tasklet);
++	struct il_priv *il = from_work(il, t, irq_work);
+ 	u32 inta, handled = 0;
+ 	u32 inta_fh;
+ 	unsigned long flags;
+@@ -1386,7 +1387,7 @@ il3945_irq_tasklet(struct tasklet_struct *t)
+ 
+ 	/* Ack/clear/reset pending flow-handler (DMA) interrupts.
+ 	 * Any new interrupts that happen after this, either while we're
+-	 * in this tasklet, or later, will show up in next ISR/tasklet. */
++	 * in this work, or later, will show up in next ISR/work. */
+ 	inta_fh = _il_rd(il, CSR_FH_INT_STATUS);
+ 	_il_wr(il, CSR_FH_INT_STATUS, inta_fh);
+ 
+@@ -3393,7 +3394,7 @@ il3945_setup_deferred_work(struct il_priv *il)
+ 
+ 	timer_setup(&il->watchdog, il_bg_watchdog, 0);
+ 
+-	tasklet_setup(&il->irq_tasklet, il3945_irq_tasklet);
++	INIT_WORK(&il->irq_work, il3945_irq_work);
+ 
+ 	return 0;
+ }
+@@ -3801,7 +3802,7 @@ il3945_pci_remove(struct pci_dev *pdev)
+ 	il_apm_stop(il);
+ 
+ 	/* make sure we flush any pending irq or
+-	 * tasklet for the driver
++	 * work for the driver
+ 	 */
+ 	spin_lock_irqsave(&il->lock, flags);
+ 	il_disable_interrupts(il);
+diff --git a/drivers/net/wireless/intel/iwlegacy/4965-mac.c b/drivers/net/wireless/intel/iwlegacy/4965-mac.c
+index 70e420df1643..ba74d3d6fa28 100644
+--- a/drivers/net/wireless/intel/iwlegacy/4965-mac.c
++++ b/drivers/net/wireless/intel/iwlegacy/4965-mac.c
+@@ -28,6 +28,7 @@
+ #include <linux/etherdevice.h>
+ #include <linux/if_arp.h>
+ #include <linux/units.h>
++#include <linux/workqueue.h>
+ 
+ #include <net/mac80211.h>
+ 
+@@ -4322,19 +4323,19 @@ il4965_rx_handle(struct il_priv *il)
+ 		il4965_rx_queue_restock(il);
+ }
+ 
+-/* call this function to flush any scheduled tasklet */
++/* call this function to flush any scheduled work */
+ static inline void
+ il4965_synchronize_irq(struct il_priv *il)
+ {
+-	/* wait to make sure we flush pending tasklet */
++	/* wait to make sure we flush pending work */
+ 	synchronize_irq(il->pci_dev->irq);
+-	tasklet_kill(&il->irq_tasklet);
++	cancel_work_sync(&il->irq_work);
+ }
+ 
+ static void
+-il4965_irq_tasklet(struct tasklet_struct *t)
++il4965_irq_work(struct tasklet_struct *t)
+ {
+-	struct il_priv *il = from_tasklet(il, t, irq_tasklet);
++	struct il_priv *il = from_work(il, t, irq_work);
+ 	u32 inta, handled = 0;
+ 	u32 inta_fh;
+ 	unsigned long flags;
+@@ -4353,7 +4354,7 @@ il4965_irq_tasklet(struct tasklet_struct *t)
+ 
+ 	/* Ack/clear/reset pending flow-handler (DMA) interrupts.
+ 	 * Any new interrupts that happen after this, either while we're
+-	 * in this tasklet, or later, will show up in next ISR/tasklet. */
++	 * in this work, or later, will show up in next ISR/work. */
+ 	inta_fh = _il_rd(il, CSR_FH_INT_STATUS);
+ 	_il_wr(il, CSR_FH_INT_STATUS, inta_fh);
+ 
+@@ -6228,7 +6229,7 @@ il4965_setup_deferred_work(struct il_priv *il)
+ 
+ 	timer_setup(&il->watchdog, il_bg_watchdog, 0);
+ 
+-	tasklet_setup(&il->irq_tasklet, il4965_irq_tasklet);
++	INIT_WORK(&il->irq_work, il4965_irq_work);
+ 
+ 	return 0;
+ }
+@@ -6717,7 +6718,7 @@ il4965_pci_remove(struct pci_dev *pdev)
+ 	il_apm_stop(il);
+ 
+ 	/* make sure we flush any pending irq or
+-	 * tasklet for the driver
++	 * work for the driver
+ 	 */
+ 	spin_lock_irqsave(&il->lock, flags);
+ 	il_disable_interrupts(il);
+diff --git a/drivers/net/wireless/intel/iwlegacy/common.h b/drivers/net/wireless/intel/iwlegacy/common.h
+index 69687fcf963f..c7355e8a995a 100644
+--- a/drivers/net/wireless/intel/iwlegacy/common.h
++++ b/drivers/net/wireless/intel/iwlegacy/common.h
+@@ -17,6 +17,7 @@
+ #include <linux/leds.h>
+ #include <linux/wait.h>
+ #include <linux/io.h>
++#include <linux/workqueue.h>
+ #include <net/mac80211.h>
+ #include <net/ieee80211_radiotap.h>
+ 
+@@ -1380,7 +1381,7 @@ struct il_priv {
+ 
+ 	struct work_struct tx_flush;
+ 
+-	struct tasklet_struct irq_tasklet;
++	struct work_struct irq_work;
+ 
+ 	struct delayed_work init_alive_start;
+ 	struct delayed_work alive_start;
+diff --git a/drivers/net/wireless/intel/iwlwifi/mvm/sta.h b/drivers/net/wireless/intel/iwlwifi/mvm/sta.h
+index b33a0ce096d4..1d321baddd6d 100644
+--- a/drivers/net/wireless/intel/iwlwifi/mvm/sta.h
++++ b/drivers/net/wireless/intel/iwlwifi/mvm/sta.h
+@@ -109,7 +109,7 @@ struct iwl_mvm_vif;
+  * information (the state machine / and the logic that checks if the queues
+  * were drained), so it also needs to be accessible from the Tx response flow.
+  * In short, the station needs to be access from sleepable context as well as
+- * from tasklets, so the station itself needs a spinlock.
++ * from works, so the station itself needs a spinlock.
+  *
+  * The writers of %fw_id_to_mac_id map are serialized by the global mutex of
+  * the mvm op_mode. This is possible since %sta_state can sleep.
+diff --git a/drivers/net/wireless/intersil/p54/p54pci.c b/drivers/net/wireless/intersil/p54/p54pci.c
+index e97ee547b9f3..9fd9ddb15e23 100644
+--- a/drivers/net/wireless/intersil/p54/p54pci.c
++++ b/drivers/net/wireless/intersil/p54/p54pci.c
+@@ -17,6 +17,7 @@
+ #include <linux/delay.h>
+ #include <linux/completion.h>
+ #include <linux/module.h>
++#include <linux/workqueue.h>
+ #include <net/mac80211.h>
+ 
+ #include "p54.h"
+@@ -278,9 +279,9 @@ static void p54p_check_tx_ring(struct ieee80211_hw *dev, u32 *index,
+ 	}
+ }
+ 
+-static void p54p_tasklet(struct tasklet_struct *t)
++static void p54p_work(struct work_struct *t)
+ {
+-	struct p54p_priv *priv = from_tasklet(priv, t, tasklet);
++	struct p54p_priv *priv = from_work(priv, t, work);
+ 	struct ieee80211_hw *dev = pci_get_drvdata(priv->pdev);
+ 	struct p54p_ring_control *ring_control = priv->ring_control;
+ 
+@@ -317,7 +318,7 @@ static irqreturn_t p54p_interrupt(int irq, void *dev_id)
+ 	reg &= P54P_READ(int_enable);
+ 
+ 	if (reg & cpu_to_le32(ISL38XX_INT_IDENT_UPDATE))
+-		tasklet_schedule(&priv->tasklet);
++		queue_work(system_bh_wq, &priv->work);
+ 	else if (reg & cpu_to_le32(ISL38XX_INT_IDENT_INIT))
+ 		complete(&priv->boot_comp);
+ 
+@@ -377,7 +378,7 @@ static void p54p_stop(struct ieee80211_hw *dev)
+ 
+ 	free_irq(priv->pdev->irq, dev);
+ 
+-	tasklet_kill(&priv->tasklet);
++	cancel_work_sync(&priv->work);
+ 
+ 	P54P_WRITE(dev_int, cpu_to_le32(ISL38XX_DEV_INT_RESET));
+ 
+@@ -622,7 +623,7 @@ static int p54p_probe(struct pci_dev *pdev,
+ 	priv->common.tx = p54p_tx;
+ 
+ 	spin_lock_init(&priv->lock);
+-	tasklet_setup(&priv->tasklet, p54p_tasklet);
++	INIT_WORK(&priv->work, p54p_work);
+ 
+ 	err = request_firmware_nowait(THIS_MODULE, 1, "isl3886pci",
+ 				      &priv->pdev->dev, GFP_KERNEL,
+diff --git a/drivers/net/wireless/intersil/p54/p54pci.h b/drivers/net/wireless/intersil/p54/p54pci.h
+index 3867e5935ac4..bd1b3a9737e0 100644
+--- a/drivers/net/wireless/intersil/p54/p54pci.h
++++ b/drivers/net/wireless/intersil/p54/p54pci.h
+@@ -2,6 +2,7 @@
+ #ifndef P54PCI_H
+ #define P54PCI_H
+ #include <linux/interrupt.h>
++#include <linux/workqueue.h>
+ 
+ /*
+  * Defines for PCI based mac80211 Prism54 driver
+@@ -90,7 +91,7 @@ struct p54p_priv {
+ 	struct p54_common common;
+ 	struct pci_dev *pdev;
+ 	struct p54p_csr __iomem *map;
+-	struct tasklet_struct tasklet;
++	struct work_struct work;
+ 	const struct firmware *firmware;
+ 	spinlock_t lock;
+ 	struct p54p_ring_control *ring_control;
+diff --git a/drivers/net/wireless/marvell/mwl8k.c b/drivers/net/wireless/marvell/mwl8k.c
+index 13bcb123d122..9245bfadf74e 100644
+--- a/drivers/net/wireless/marvell/mwl8k.c
++++ b/drivers/net/wireless/marvell/mwl8k.c
+@@ -24,6 +24,7 @@
+ #include <linux/moduleparam.h>
+ #include <linux/firmware.h>
+ #include <linux/workqueue.h>
++#include <linux/workqueue.h>
+ 
+ #define MWL8K_DESC	"Marvell TOPDOG(R) 802.11 Wireless Network Driver"
+ #define MWL8K_NAME	KBUILD_MODNAME
+@@ -266,11 +267,11 @@ struct mwl8k_priv {
+ 	 */
+ 	struct work_struct finalize_join_worker;
+ 
+-	/* Tasklet to perform TX reclaim.  */
+-	struct tasklet_struct poll_tx_task;
++	/* Work to perform TX reclaim.  */
++	struct work_struct poll_tx_task;
+ 
+-	/* Tasklet to perform RX.  */
+-	struct tasklet_struct poll_rx_task;
++	/* Work to perform RX.  */
++	struct work_struct poll_rx_task;
+ 
+ 	/* Most recently reported noise in dBm */
+ 	s8 noise;
+@@ -281,7 +282,7 @@ struct mwl8k_priv {
+ 	 */
+ 	struct ieee80211_tx_queue_params wmm_params[MWL8K_TX_WMM_QUEUES];
+ 
+-	/* To perform the task of reloading the firmware */
++	/* To perform the work of reloading the firmware */
+ 	struct work_struct fw_reload;
+ 	bool hw_restart_in_progress;
+ 
+@@ -1360,7 +1361,7 @@ static int rxq_process(struct ieee80211_hw *hw, int index, int limit)
+ 
+ 		/*
+ 		 * Check for a pending join operation.  Save a
+-		 * copy of the beacon and schedule a tasklet to
++		 * copy of the beacon and schedule a work to
+ 		 * send a FINALIZE_JOIN command to the firmware.
+ 		 */
+ 		if (mwl8k_capture_bssid(priv, (void *)skb->data))
+@@ -4603,12 +4604,12 @@ static irqreturn_t mwl8k_interrupt(int irq, void *dev_id)
+ 
+ 	if (status & MWL8K_A2H_INT_TX_DONE) {
+ 		status &= ~MWL8K_A2H_INT_TX_DONE;
+-		tasklet_schedule(&priv->poll_tx_task);
++		queue_work(system_bh_wq, &priv->poll_tx_task);
+ 	}
+ 
+ 	if (status & MWL8K_A2H_INT_RX_READY) {
+ 		status &= ~MWL8K_A2H_INT_RX_READY;
+-		tasklet_schedule(&priv->poll_rx_task);
++		queue_work(system_bh_wq, &priv->poll_rx_task);
+ 	}
+ 
+ 	if (status & MWL8K_A2H_INT_BA_WATCHDOG) {
+@@ -4637,9 +4638,9 @@ static irqreturn_t mwl8k_interrupt(int irq, void *dev_id)
+ 	return IRQ_HANDLED;
+ }
+ 
+-static void mwl8k_tx_poll(struct tasklet_struct *t)
++static void mwl8k_tx_poll(struct work_struct *t)
+ {
+-	struct mwl8k_priv *priv = from_tasklet(priv, t, poll_tx_task);
++	struct mwl8k_priv *priv = from_work(priv, t, poll_tx_task);
+ 	struct ieee80211_hw *hw = pci_get_drvdata(priv->pdev);
+ 	int limit;
+ 	int i;
+@@ -4662,13 +4663,13 @@ static void mwl8k_tx_poll(struct tasklet_struct *t)
+ 		writel(~MWL8K_A2H_INT_TX_DONE,
+ 		       priv->regs + MWL8K_HIU_A2H_INTERRUPT_STATUS);
+ 	} else {
+-		tasklet_schedule(&priv->poll_tx_task);
++		queue_work(system_bh_wq, &priv->poll_tx_task);
+ 	}
+ }
+ 
+-static void mwl8k_rx_poll(struct tasklet_struct *t)
++static void mwl8k_rx_poll(struct work_struct *t)
+ {
+-	struct mwl8k_priv *priv = from_tasklet(priv, t, poll_rx_task);
++	struct mwl8k_priv *priv = from_work(priv, t, poll_rx_task);
+ 	struct ieee80211_hw *hw = pci_get_drvdata(priv->pdev);
+ 	int limit;
+ 
+@@ -4680,7 +4681,7 @@ static void mwl8k_rx_poll(struct tasklet_struct *t)
+ 		writel(~MWL8K_A2H_INT_RX_READY,
+ 		       priv->regs + MWL8K_HIU_A2H_INTERRUPT_STATUS);
+ 	} else {
+-		tasklet_schedule(&priv->poll_rx_task);
++		queue_work(system_bh_wq, &priv->poll_rx_task);
+ 	}
+ }
+ 
+@@ -4719,9 +4720,9 @@ static int mwl8k_start(struct ieee80211_hw *hw)
+ 	}
+ 	priv->irq = priv->pdev->irq;
+ 
+-	/* Enable TX reclaim and RX tasklets.  */
+-	tasklet_enable(&priv->poll_tx_task);
+-	tasklet_enable(&priv->poll_rx_task);
++	/* Enable TX reclaim and RX works.  */
++	enable_and_queue_work(system_bh_wq, &priv->poll_tx_task);
++	enable_and_queue_work(system_bh_wq, &priv->poll_rx_task);
+ 
+ 	/* Enable interrupts */
+ 	iowrite32(MWL8K_A2H_EVENTS, priv->regs + MWL8K_HIU_A2H_INTERRUPT_MASK);
+@@ -4757,8 +4758,8 @@ static int mwl8k_start(struct ieee80211_hw *hw)
+ 		iowrite32(0, priv->regs + MWL8K_HIU_A2H_INTERRUPT_MASK);
+ 		free_irq(priv->pdev->irq, hw);
+ 		priv->irq = -1;
+-		tasklet_disable(&priv->poll_tx_task);
+-		tasklet_disable(&priv->poll_rx_task);
++		disable_work_sync(&priv->poll_tx_task);
++		disable_work_sync(&priv->poll_rx_task);
+ 	} else {
+ 		ieee80211_wake_queues(hw);
+ 	}
+@@ -4789,9 +4790,9 @@ static void mwl8k_stop(struct ieee80211_hw *hw)
+ 	if (priv->beacon_skb != NULL)
+ 		dev_kfree_skb(priv->beacon_skb);
+ 
+-	/* Stop TX reclaim and RX tasklets.  */
+-	tasklet_disable(&priv->poll_tx_task);
+-	tasklet_disable(&priv->poll_rx_task);
++	/* Stop TX reclaim and RX works.  */
++	disable_work_sync(&priv->poll_tx_task);
++	disable_work_sync(&priv->poll_rx_task);
+ 
+ 	/* Return all skbs to mac80211 */
+ 	for (i = 0; i < mwl8k_tx_queues(priv); i++)
+@@ -6128,11 +6129,11 @@ static int mwl8k_firmware_load_success(struct mwl8k_priv *priv)
+ 	/* To reload the firmware if it crashes */
+ 	INIT_WORK(&priv->fw_reload, mwl8k_hw_restart_work);
+ 
+-	/* TX reclaim and RX tasklets.  */
+-	tasklet_setup(&priv->poll_tx_task, mwl8k_tx_poll);
+-	tasklet_disable(&priv->poll_tx_task);
+-	tasklet_setup(&priv->poll_rx_task, mwl8k_rx_poll);
+-	tasklet_disable(&priv->poll_rx_task);
++	/* TX reclaim and RX works.  */
++	INIT_WORK(&priv->poll_tx_task, mwl8k_tx_poll);
++	disable_work_sync(&priv->poll_tx_task);
++	INIT_WORK(&priv->poll_rx_task, mwl8k_rx_poll);
++	disable_work_sync(&priv->poll_rx_task);
+ 
+ 	/* Power management cookie */
+ 	priv->cookie = dma_alloc_coherent(&priv->pdev->dev, 4,
+@@ -6332,9 +6333,9 @@ static void mwl8k_remove(struct pci_dev *pdev)
+ 
+ 	ieee80211_unregister_hw(hw);
+ 
+-	/* Remove TX reclaim and RX tasklets.  */
+-	tasklet_kill(&priv->poll_tx_task);
+-	tasklet_kill(&priv->poll_rx_task);
++	/* Remove TX reclaim and RX works.  */
++	cancel_work_sync(&priv->poll_tx_task);
++	cancel_work_sync(&priv->poll_rx_task);
+ 
+ 	/* Stop hardware */
+ 	mwl8k_hw_reset(priv);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76.h b/drivers/net/wireless/mediatek/mt76/mt76.h
+index b20c34d5a0f7..0a0a7caf15d4 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76.h
+@@ -14,6 +14,7 @@
+ #include <linux/usb.h>
+ #include <linux/average.h>
+ #include <linux/soc/mediatek/mtk_wed.h>
++#include <linux/workqueue.h>
+ #include <net/mac80211.h>
+ #include <net/page_pool/helpers.h>
+ #include "util.h"
+@@ -835,7 +836,7 @@ struct mt76_dev {
+ 	spinlock_t rx_lock;
+ 	struct napi_struct napi[__MT_RXQ_MAX];
+ 	struct sk_buff_head rx_skb[__MT_RXQ_MAX];
+-	struct tasklet_struct irq_tasklet;
++	struct work_struct irq_work;
+ 
+ 	struct list_head txwi_cache;
+ 	struct list_head rxwi_cache;
+@@ -875,7 +876,7 @@ struct mt76_dev {
+ 
+ 	u32 rev;
+ 
+-	struct tasklet_struct pre_tbtt_tasklet;
++	struct work_struct pre_tbtt_work;
+ 	int beacon_int;
+ 	u8 beacon_mask;
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7603/beacon.c b/drivers/net/wireless/mediatek/mt76/mt7603/beacon.c
+index c223f7c19e6d..e291744fee48 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7603/beacon.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7603/beacon.c
+@@ -98,9 +98,9 @@ mt7603_add_buffered_bc(void *priv, u8 *mac, struct ieee80211_vif *vif)
+ 	data->count[mvif->idx]++;
+ }
+ 
+-void mt7603_pre_tbtt_tasklet(struct tasklet_struct *t)
++void mt7603_pre_tbtt_work(struct tasklet_struct *t)
+ {
+-	struct mt7603_dev *dev = from_tasklet(dev, t, mt76.pre_tbtt_tasklet);
++	struct mt7603_dev *dev = from_work(dev, t, mt76.pre_tbtt_work);
+ 	struct mt76_dev *mdev = &dev->mt76;
+ 	struct mt76_queue *q;
+ 	struct beacon_bc_data data = {};
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7603/init.c b/drivers/net/wireless/mediatek/mt76/mt7603/init.c
+index 6c55c72f28a2..499b24f3b90d 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7603/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7603/init.c
+@@ -560,7 +560,7 @@ int mt7603_register_device(struct mt7603_dev *dev)
+ 
+ void mt7603_unregister_device(struct mt7603_dev *dev)
+ {
+-	tasklet_disable(&dev->mt76.pre_tbtt_tasklet);
++	disable_work_sync(&dev->mt76.pre_tbtt_tasklet);
+ 	mt76_unregister_device(&dev->mt76);
+ 	mt7603_mcu_exit(dev);
+ 	mt7603_dma_cleanup(dev);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7603/mac.c b/drivers/net/wireless/mediatek/mt76/mt7603/mac.c
+index cf21d06257e5..c6045deb1c36 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7603/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7603/mac.c
+@@ -1432,7 +1432,7 @@ static void mt7603_mac_watchdog_reset(struct mt7603_dev *dev)
+ 	mt76_txq_schedule_all(&dev->mphy);
+ 
+ 	mt76_worker_disable(&dev->mt76.tx_worker);
+-	tasklet_disable(&dev->mt76.pre_tbtt_tasklet);
++	disable_work_sync(&dev->mt76.pre_tbtt_tasklet);
+ 	napi_disable(&dev->mt76.napi[0]);
+ 	napi_disable(&dev->mt76.napi[1]);
+ 	napi_disable(&dev->mt76.tx_napi);
+@@ -1480,7 +1480,7 @@ static void mt7603_mac_watchdog_reset(struct mt7603_dev *dev)
+ 
+ 	mt76_worker_enable(&dev->mt76.tx_worker);
+ 
+-	tasklet_enable(&dev->mt76.pre_tbtt_tasklet);
++	enable_and_queue_work(system_bh_wq, &dev->mt76.pre_tbtt_tasklet);
+ 	mt7603_beacon_set_timer(dev, -1, beacon_int);
+ 
+ 	local_bh_disable();
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7603/main.c b/drivers/net/wireless/mediatek/mt76/mt7603/main.c
+index 89d738deea62..e139a871b724 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7603/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7603/main.c
+@@ -144,7 +144,7 @@ mt7603_set_channel(struct ieee80211_hw *hw, struct cfg80211_chan_def *def)
+ 
+ 	ieee80211_stop_queues(hw);
+ 	cancel_delayed_work_sync(&dev->mphy.mac_work);
+-	tasklet_disable(&dev->mt76.pre_tbtt_tasklet);
++	disable_work_sync(&dev->mt76.pre_tbtt_tasklet);
+ 
+ 	mutex_lock(&dev->mt76.mutex);
+ 	set_bit(MT76_RESET, &dev->mphy.state);
+@@ -203,7 +203,7 @@ mt7603_set_channel(struct ieee80211_hw *hw, struct cfg80211_chan_def *def)
+ 		mt7603_beacon_set_timer(dev, -1, dev->mt76.beacon_int);
+ 	mutex_unlock(&dev->mt76.mutex);
+ 
+-	tasklet_enable(&dev->mt76.pre_tbtt_tasklet);
++	enable_and_queue_work(system_bh_wq, &dev->mt76.pre_tbtt_tasklet);
+ 
+ 	if (failed)
+ 		mt7603_mac_work(&dev->mphy.mac_work.work);
+@@ -330,9 +330,9 @@ mt7603_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+ 	if (changed & (BSS_CHANGED_BEACON_ENABLED | BSS_CHANGED_BEACON_INT)) {
+ 		int beacon_int = !!info->enable_beacon * info->beacon_int;
+ 
+-		tasklet_disable(&dev->mt76.pre_tbtt_tasklet);
++		disable_work_sync(&dev->mt76.pre_tbtt_tasklet);
+ 		mt7603_beacon_set_timer(dev, mvif->idx, beacon_int);
+-		tasklet_enable(&dev->mt76.pre_tbtt_tasklet);
++		enable_and_queue_work(system_bh_wq, &dev->mt76.pre_tbtt_tasklet);
+ 	}
+ 
+ 	mutex_unlock(&dev->mt76.mutex);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7603/mt7603.h b/drivers/net/wireless/mediatek/mt76/mt7603/mt7603.h
+index 9e58df7042ad..42df7043e568 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7603/mt7603.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7603/mt7603.h
+@@ -5,6 +5,7 @@
+ 
+ #include <linux/interrupt.h>
+ #include <linux/ktime.h>
++#include <linux/workqueue.h>
+ #include "../mt76.h"
+ #include "regs.h"
+ 
+@@ -250,7 +251,7 @@ void mt7603_sta_assoc(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ void mt7603_sta_remove(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 		       struct ieee80211_sta *sta);
+ 
+-void mt7603_pre_tbtt_tasklet(struct tasklet_struct *t);
++void mt7603_pre_tbtt_work(struct work_struct *t);
+ 
+ void mt7603_update_channel(struct mt76_phy *mphy);
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7615/mmio.c b/drivers/net/wireless/mediatek/mt76/mt7615/mmio.c
+index ac036a072439..129ef9a670a6 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7615/mmio.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7615/mmio.c
+@@ -5,6 +5,7 @@
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
+ #include <linux/pci.h>
++#include <linux/workqueue.h>
+ 
+ #include "mt7615.h"
+ #include "regs.h"
+@@ -78,14 +79,14 @@ static irqreturn_t mt7615_irq_handler(int irq, void *dev_instance)
+ 	if (!test_bit(MT76_STATE_INITIALIZED, &dev->mphy.state))
+ 		return IRQ_NONE;
+ 
+-	tasklet_schedule(&dev->mt76.irq_tasklet);
++	queue_work(system_bh_wq, &dev->mt76.irq_work);
+ 
+ 	return IRQ_HANDLED;
+ }
+ 
+-static void mt7615_irq_tasklet(struct tasklet_struct *t)
++static void mt7615_irq_work(struct work_struct *t)
+ {
+-	struct mt7615_dev *dev = from_tasklet(dev, t, mt76.irq_tasklet);
++	struct mt7615_dev *dev = from_work(dev, t, mt76.irq_work);
+ 	u32 intr, mask = 0, tx_mcu_mask = mt7615_tx_mcu_int_mask(dev);
+ 	u32 mcu_int;
+ 
+@@ -199,7 +200,7 @@ int mt7615_mmio_probe(struct device *pdev, void __iomem *mem_base,
+ 
+ 	dev = container_of(mdev, struct mt7615_dev, mt76);
+ 	mt76_mmio_init(&dev->mt76, mem_base);
+-	tasklet_setup(&mdev->irq_tasklet, mt7615_irq_tasklet);
++	INIT_WORK(&mdev->irq_work, mt7615_irq_work);
+ 
+ 	dev->reg_map = map;
+ 	dev->ops = ops;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7615/pci.c b/drivers/net/wireless/mediatek/mt76/mt7615/pci.c
+index 9f43e673518b..e423168d70a1 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7615/pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7615/pci.c
+@@ -94,7 +94,7 @@ static int mt7615_pci_suspend(struct pci_dev *pdev, pm_message_t state)
+ 	mt76_for_each_q_rx(mdev, i) {
+ 		napi_disable(&mdev->napi[i]);
+ 	}
+-	tasklet_kill(&mdev->irq_tasklet);
++	cancel_work_sync(&mdev->irq_tasklet);
+ 
+ 	mt7615_dma_reset(dev);
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7615/pci_init.c b/drivers/net/wireless/mediatek/mt76/mt7615/pci_init.c
+index f607eee3fb47..b70a41ac71e8 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7615/pci_init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7615/pci_init.c
+@@ -122,7 +122,7 @@ void mt7615_unregister_device(struct mt7615_dev *dev)
+ 
+ 	mt7615_tx_token_put(dev);
+ 	mt7615_dma_cleanup(dev);
+-	tasklet_disable(&dev->mt76.irq_tasklet);
++	disable_work_sync(&dev->mt76.irq_tasklet);
+ 
+ 	mt76_free_device(&dev->mt76);
+ }
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76x0/main.c b/drivers/net/wireless/mediatek/mt76/mt76x0/main.c
+index 07380cce8755..ff0231223716 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76x0/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt76x0/main.c
+@@ -14,7 +14,7 @@ mt76x0_set_channel(struct mt76x02_dev *dev, struct cfg80211_chan_def *chandef)
+ 	cancel_delayed_work_sync(&dev->cal_work);
+ 	mt76x02_pre_tbtt_enable(dev, false);
+ 	if (mt76_is_mmio(&dev->mt76))
+-		tasklet_disable(&dev->dfs_pd.dfs_tasklet);
++		disable_work_sync(&dev->dfs_pd.dfs_tasklet);
+ 
+ 	mt76_set_channel(&dev->mphy);
+ 	mt76x0_phy_set_channel(dev, chandef);
+@@ -24,7 +24,7 @@ mt76x0_set_channel(struct mt76x02_dev *dev, struct cfg80211_chan_def *chandef)
+ 
+ 	if (mt76_is_mmio(&dev->mt76)) {
+ 		mt76x02_dfs_init_params(dev);
+-		tasklet_enable(&dev->dfs_pd.dfs_tasklet);
++		enable_and_queue_work(system_bh_wq, &dev->dfs_pd.dfs_tasklet);
+ 	}
+ 	mt76x02_pre_tbtt_enable(dev, true);
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76x0/pci.c b/drivers/net/wireless/mediatek/mt76/mt76x0/pci.c
+index 9277ff38b7a2..dc7bb75f7819 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76x0/pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt76x0/pci.c
+@@ -218,7 +218,7 @@ mt76x0e_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ static void mt76x0e_cleanup(struct mt76x02_dev *dev)
+ {
+ 	clear_bit(MT76_STATE_INITIALIZED, &dev->mphy.state);
+-	tasklet_disable(&dev->mt76.pre_tbtt_tasklet);
++	disable_work_sync(&dev->mt76.pre_tbtt_tasklet);
+ 	mt76x0_chip_onoff(dev, false, false);
+ 	mt76x0e_stop_hw(dev);
+ 	mt76_dma_cleanup(&dev->mt76);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76x02_dfs.c b/drivers/net/wireless/mediatek/mt76/mt76x02_dfs.c
+index 024a5c0a5a57..1738d438f23f 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76x02_dfs.c
++++ b/drivers/net/wireless/mediatek/mt76/mt76x02_dfs.c
+@@ -609,10 +609,10 @@ static void mt76x02_dfs_check_event_window(struct mt76x02_dev *dev)
+ 	}
+ }
+ 
+-static void mt76x02_dfs_tasklet(struct tasklet_struct *t)
++static void mt76x02_dfs_work(struct work_struct *t)
+ {
+-	struct mt76x02_dfs_pattern_detector *dfs_pd = from_tasklet(dfs_pd, t,
+-								   dfs_tasklet);
++	struct mt76x02_dfs_pattern_detector *dfs_pd = from_work(dfs_pd, t,
++								   dfs_work);
+ 	struct mt76x02_dev *dev = container_of(dfs_pd, typeof(*dev), dfs_pd);
+ 	u32 engine_mask;
+ 	int i;
+@@ -858,7 +858,7 @@ void mt76x02_dfs_init_detector(struct mt76x02_dev *dev)
+ 	INIT_LIST_HEAD(&dfs_pd->seq_pool);
+ 	dev->mt76.region = NL80211_DFS_UNSET;
+ 	dfs_pd->last_sw_check = jiffies;
+-	tasklet_setup(&dfs_pd->dfs_tasklet, mt76x02_dfs_tasklet);
++	INIT_WORK(&dfs_pd->dfs_work, mt76x02_dfs_work);
+ }
+ 
+ static void
+@@ -869,7 +869,7 @@ mt76x02_dfs_set_domain(struct mt76x02_dev *dev,
+ 
+ 	mutex_lock(&dev->mt76.mutex);
+ 	if (dev->mt76.region != region) {
+-		tasklet_disable(&dfs_pd->dfs_tasklet);
++		disable_work_sync(&dfs_pd->dfs_work);
+ 
+ 		dev->ed_monitor = dev->ed_monitor_enabled &&
+ 				  region == NL80211_DFS_ETSI;
+@@ -877,7 +877,7 @@ mt76x02_dfs_set_domain(struct mt76x02_dev *dev,
+ 
+ 		dev->mt76.region = region;
+ 		mt76x02_dfs_init_params(dev);
+-		tasklet_enable(&dfs_pd->dfs_tasklet);
++		enable_and_queue_work(system_bh_wq, &dfs_pd->dfs_work);
+ 	}
+ 	mutex_unlock(&dev->mt76.mutex);
+ }
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76x02_dfs.h b/drivers/net/wireless/mediatek/mt76/mt76x02_dfs.h
+index 491010a32247..831153b66031 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76x02_dfs.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76x02_dfs.h
+@@ -8,6 +8,7 @@
+ 
+ #include <linux/types.h>
+ #include <linux/nl80211.h>
++#include <linux/workqueue.h>
+ 
+ #define MT_DFS_GP_INTERVAL		(10 << 4) /* 64 us unit */
+ #define MT_DFS_NUM_ENGINES		4
+@@ -121,7 +122,7 @@ struct mt76x02_dfs_pattern_detector {
+ 	u32 last_event_ts;
+ 
+ 	struct mt76x02_dfs_engine_stats stats[MT_DFS_NUM_ENGINES];
+-	struct tasklet_struct dfs_tasklet;
++	struct work_struct dfs_work;
+ };
+ 
+ void mt76x02_dfs_init_params(struct mt76x02_dev *dev);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76x02_mmio.c b/drivers/net/wireless/mediatek/mt76/mt76x02_mmio.c
+index e5ad635d3c56..ed04258ffab8 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76x02_mmio.c
++++ b/drivers/net/wireless/mediatek/mt76/mt76x02_mmio.c
+@@ -6,14 +6,15 @@
+ 
+ #include <linux/kernel.h>
+ #include <linux/irq.h>
++#include <linux/workqueue.h>
+ 
+ #include "mt76x02.h"
+ #include "mt76x02_mcu.h"
+ #include "trace.h"
+ 
+-static void mt76x02_pre_tbtt_tasklet(struct tasklet_struct *t)
++static void mt76x02_pre_tbtt_work(struct work_struct *t)
+ {
+-	struct mt76x02_dev *dev = from_tasklet(dev, t, mt76.pre_tbtt_tasklet);
++	struct mt76x02_dev *dev = from_work(dev, t, mt76.pre_tbtt_work);
+ 	struct mt76_dev *mdev = &dev->mt76;
+ 	struct mt76_queue *q = dev->mphy.q_tx[MT_TXQ_PSD];
+ 	struct beacon_bc_data data = {
+@@ -75,9 +76,9 @@ static void mt76x02_pre_tbtt_tasklet(struct tasklet_struct *t)
+ static void mt76x02e_pre_tbtt_enable(struct mt76x02_dev *dev, bool en)
+ {
+ 	if (en)
+-		tasklet_enable(&dev->mt76.pre_tbtt_tasklet);
++		enable_and_queue_work(system_bh_wq, &dev->mt76.pre_tbtt_work);
+ 	else
+-		tasklet_disable(&dev->mt76.pre_tbtt_tasklet);
++		disable_work_sync(&dev->mt76.pre_tbtt_work);
+ }
+ 
+ static void mt76x02e_beacon_enable(struct mt76x02_dev *dev, bool en)
+@@ -187,7 +188,7 @@ int mt76x02_dma_init(struct mt76x02_dev *dev)
+ 		return -ENOMEM;
+ 
+ 	dev->mt76.tx_worker.fn = mt76x02_tx_worker;
+-	tasklet_setup(&dev->mt76.pre_tbtt_tasklet, mt76x02_pre_tbtt_tasklet);
++	INIT_WORK(&dev->mt76.pre_tbtt_work, mt76x02_pre_tbtt_work);
+ 
+ 	spin_lock_init(&dev->txstatus_fifo_lock);
+ 	kfifo_init(&dev->txstatus_fifo, status_fifo, fifo_size);
+@@ -283,7 +284,7 @@ irqreturn_t mt76x02_irq_handler(int irq, void *dev_instance)
+ 		napi_schedule(&dev->mt76.napi[1]);
+ 
+ 	if (intr & MT_INT_PRE_TBTT)
+-		tasklet_schedule(&dev->mt76.pre_tbtt_tasklet);
++		queue_work(system_bh_wq, &dev->mt76.pre_tbtt_work);
+ 
+ 	/* send buffered multicast frames now */
+ 	if (intr & MT_INT_TBTT) {
+@@ -300,7 +301,7 @@ irqreturn_t mt76x02_irq_handler(int irq, void *dev_instance)
+ 		napi_schedule(&dev->mt76.tx_napi);
+ 
+ 	if (intr & MT_INT_GPTIMER)
+-		tasklet_schedule(&dev->dfs_pd.dfs_tasklet);
++		queue_work(system_bh_wq, &dev->dfs_pd.dfs_work);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -440,7 +441,7 @@ static void mt76x02_watchdog_reset(struct mt76x02_dev *dev)
+ 	ieee80211_stop_queues(dev->mt76.hw);
+ 	set_bit(MT76_RESET, &dev->mphy.state);
+ 
+-	tasklet_disable(&dev->mt76.pre_tbtt_tasklet);
++	disable_work_sync(&dev->mt76.pre_tbtt_work);
+ 	mt76_worker_disable(&dev->mt76.tx_worker);
+ 	napi_disable(&dev->mt76.tx_napi);
+ 
+@@ -502,7 +503,7 @@ static void mt76x02_watchdog_reset(struct mt76x02_dev *dev)
+ 	clear_bit(MT76_RESET, &dev->mphy.state);
+ 
+ 	mt76_worker_enable(&dev->mt76.tx_worker);
+-	tasklet_enable(&dev->mt76.pre_tbtt_tasklet);
++	enable_and_queue_work(system_bh_wq, &dev->mt76.pre_tbtt_work);
+ 
+ 	local_bh_disable();
+ 	napi_enable(&dev->mt76.tx_napi);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76x2/pci.c b/drivers/net/wireless/mediatek/mt76/mt76x2/pci.c
+index df85ebc6e1df..69e81dab2068 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76x2/pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt76x2/pci.c
+@@ -113,7 +113,7 @@ mt76x2e_suspend(struct pci_dev *pdev, pm_message_t state)
+ 	int i, err;
+ 
+ 	napi_disable(&mdev->tx_napi);
+-	tasklet_kill(&mdev->pre_tbtt_tasklet);
++	cancel_work_sync(&mdev->pre_tbtt_tasklet);
+ 	mt76_worker_disable(&mdev->tx_worker);
+ 
+ 	mt76_for_each_q_rx(mdev, i)
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76x2/pci_init.c b/drivers/net/wireless/mediatek/mt76/mt76x2/pci_init.c
+index e38e8e5685c2..109b9f1cda1c 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76x2/pci_init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt76x2/pci_init.c
+@@ -280,8 +280,8 @@ void mt76x2_stop_hardware(struct mt76x02_dev *dev)
+ 
+ void mt76x2_cleanup(struct mt76x02_dev *dev)
+ {
+-	tasklet_disable(&dev->dfs_pd.dfs_tasklet);
+-	tasklet_disable(&dev->mt76.pre_tbtt_tasklet);
++	disable_work_sync(&dev->dfs_pd.dfs_tasklet);
++	disable_work_sync(&dev->mt76.pre_tbtt_tasklet);
+ 	mt76x2_stop_hardware(dev);
+ 	mt76_dma_cleanup(&dev->mt76);
+ 	mt76x02_mcu_cleanup(dev);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76x2/pci_main.c b/drivers/net/wireless/mediatek/mt76/mt76x2/pci_main.c
+index b38bb7a2362b..7632485a558b 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76x2/pci_main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt76x2/pci_main.c
+@@ -36,8 +36,8 @@ static void
+ mt76x2_set_channel(struct mt76x02_dev *dev, struct cfg80211_chan_def *chandef)
+ {
+ 	cancel_delayed_work_sync(&dev->cal_work);
+-	tasklet_disable(&dev->mt76.pre_tbtt_tasklet);
+-	tasklet_disable(&dev->dfs_pd.dfs_tasklet);
++	disable_work_sync(&dev->mt76.pre_tbtt_tasklet);
++	disable_work_sync(&dev->dfs_pd.dfs_tasklet);
+ 
+ 	mutex_lock(&dev->mt76.mutex);
+ 	set_bit(MT76_RESET, &dev->mphy.state);
+@@ -55,8 +55,8 @@ mt76x2_set_channel(struct mt76x02_dev *dev, struct cfg80211_chan_def *chandef)
+ 	clear_bit(MT76_RESET, &dev->mphy.state);
+ 	mutex_unlock(&dev->mt76.mutex);
+ 
+-	tasklet_enable(&dev->dfs_pd.dfs_tasklet);
+-	tasklet_enable(&dev->mt76.pre_tbtt_tasklet);
++	enable_and_queue_work(system_bh_wq, &dev->dfs_pd.dfs_tasklet);
++	enable_and_queue_work(system_bh_wq, &dev->mt76.pre_tbtt_tasklet);
+ 
+ 	mt76_txq_schedule_all(&dev->mphy);
+ }
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/init.c b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+index cea2f6d9050a..cc3a5c677a60 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+@@ -1183,7 +1183,7 @@ static void mt7915_stop_hardware(struct mt7915_dev *dev)
+ 	mt7915_mcu_exit(dev);
+ 	mt76_connac2_tx_token_put(&dev->mt76);
+ 	mt7915_dma_cleanup(dev);
+-	tasklet_disable(&dev->mt76.irq_tasklet);
++	disable_work_sync(&dev->mt76.irq_tasklet);
+ 
+ 	if (is_mt798x(&dev->mt76))
+ 		mt7986_wmac_disable(dev);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mmio.c b/drivers/net/wireless/mediatek/mt76/mt7915/mmio.c
+index aff4f21e843d..61c1cb2d76fd 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mmio.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mmio.c
+@@ -6,6 +6,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/rtnetlink.h>
+ #include <linux/pci.h>
++#include <linux/workqueue.h>
+ 
+ #include "mt7915.h"
+ #include "mac.h"
+@@ -783,9 +784,9 @@ static void mt7915_rx_poll_complete(struct mt76_dev *mdev,
+ }
+ 
+ /* TODO: support 2/4/6/8 MSI-X vectors */
+-static void mt7915_irq_tasklet(struct tasklet_struct *t)
++static void mt7915_irq_work(struct work_struct *t)
+ {
+-	struct mt7915_dev *dev = from_tasklet(dev, t, mt76.irq_tasklet);
++	struct mt7915_dev *dev = from_work(dev, t, mt76.irq_work);
+ 	struct mtk_wed_device *wed = &dev->mt76.mmio.wed;
+ 	u32 intr, intr1, mask;
+ 
+@@ -869,7 +870,7 @@ irqreturn_t mt7915_irq_handler(int irq, void *dev_instance)
+ 	if (!test_bit(MT76_STATE_INITIALIZED, &dev->mphy.state))
+ 		return IRQ_NONE;
+ 
+-	tasklet_schedule(&dev->mt76.irq_tasklet);
++	queue_work(system_bh_wq, &dev->mt76.irq_work);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -909,7 +910,7 @@ struct mt7915_dev *mt7915_mmio_probe(struct device *pdev,
+ 	if (ret)
+ 		goto error;
+ 
+-	tasklet_setup(&mdev->irq_tasklet, mt7915_irq_tasklet);
++	INIT_WORK(&mdev->irq_work, mt7915_irq_work);
+ 
+ 	return dev;
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/pci.c b/drivers/net/wireless/mediatek/mt76/mt7921/pci.c
+index 57903c6e4f11..5da076420440 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/pci.c
+@@ -54,7 +54,7 @@ static void mt7921e_unregister_device(struct mt792x_dev *dev)
+ 	mt792x_wfsys_reset(dev);
+ 	skb_queue_purge(&dev->mt76.mcu.res_q);
+ 
+-	tasklet_disable(&dev->mt76.irq_tasklet);
++	disable_work_sync(&dev->mt76.irq_tasklet);
+ }
+ 
+ static u32 __mt7921_reg_addr(struct mt792x_dev *dev, u32 addr)
+@@ -438,7 +438,7 @@ static int mt7921_pci_suspend(struct device *device)
+ 	mt76_wr(dev, dev->irq_map->host_irq_enable, 0);
+ 	mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, 0x0);
+ 	synchronize_irq(pdev->irq);
+-	tasklet_kill(&mdev->irq_tasklet);
++	cancel_work_sync(&mdev->irq_tasklet);
+ 
+ 	err = mt792x_mcu_fw_pmctrl(dev);
+ 	if (err)
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7925/pci.c b/drivers/net/wireless/mediatek/mt76/mt7925/pci.c
+index 734f31ee40d3..90a278fe8367 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7925/pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7925/pci.c
+@@ -46,7 +46,7 @@ static void mt7925e_unregister_device(struct mt792x_dev *dev)
+ 	mt792x_wfsys_reset(dev);
+ 	skb_queue_purge(&dev->mt76.mcu.res_q);
+ 
+-	tasklet_disable(&dev->mt76.irq_tasklet);
++	disable_work_sync(&dev->mt76.irq_tasklet);
+ }
+ 
+ static void mt7925_reg_remap_restore(struct mt792x_dev *dev)
+@@ -481,7 +481,7 @@ static int mt7925_pci_suspend(struct device *device)
+ 	mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, 0x0);
+ 
+ 	synchronize_irq(pdev->irq);
+-	tasklet_kill(&mdev->irq_tasklet);
++	cancel_work_sync(&mdev->irq_tasklet);
+ 
+ 	err = mt792x_mcu_fw_pmctrl(dev);
+ 	if (err)
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7996/init.c b/drivers/net/wireless/mediatek/mt76/mt7996/init.c
+index 0cf0d1fe420a..7ce7a1802371 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7996/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7996/init.c
+@@ -1374,7 +1374,7 @@ void mt7996_unregister_device(struct mt7996_dev *dev)
+ 	mt7996_mcu_exit(dev);
+ 	mt7996_tx_token_put(dev);
+ 	mt7996_dma_cleanup(dev);
+-	tasklet_disable(&dev->mt76.irq_tasklet);
++	disable_work_sync(&dev->mt76.irq_tasklet);
+ 
+ 	mt76_free_device(&dev->mt76);
+ }
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7996/mmio.c b/drivers/net/wireless/mediatek/mt76/mt7996/mmio.c
+index c50d89a445e9..2191e572da20 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7996/mmio.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7996/mmio.c
+@@ -7,6 +7,7 @@
+ #include <linux/module.h>
+ #include <linux/pci.h>
+ #include <linux/rtnetlink.h>
++#include <linux/workqueue.h>
+ 
+ #include "mt7996.h"
+ #include "mac.h"
+@@ -494,9 +495,9 @@ static void mt7996_rx_poll_complete(struct mt76_dev *mdev,
+ }
+ 
+ /* TODO: support 2/4/6/8 MSI-X vectors */
+-static void mt7996_irq_tasklet(struct tasklet_struct *t)
++static void mt7996_irq_work(struct work_struct *t)
+ {
+-	struct mt7996_dev *dev = from_tasklet(dev, t, mt76.irq_tasklet);
++	struct mt7996_dev *dev = from_work(dev, t, mt76.irq_work);
+ 	struct mtk_wed_device *wed = &dev->mt76.mmio.wed;
+ 	struct mtk_wed_device *wed_hif2 = &dev->mt76.mmio.wed_hif2;
+ 	u32 i, intr, mask, intr1;
+@@ -574,7 +575,7 @@ irqreturn_t mt7996_irq_handler(int irq, void *dev_instance)
+ 	if (!test_bit(MT76_STATE_INITIALIZED, &dev->mphy.state))
+ 		return IRQ_NONE;
+ 
+-	tasklet_schedule(&dev->mt76.irq_tasklet);
++	queue_work(system_bh_wq, &dev->mt76.irq_work);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -615,7 +616,7 @@ struct mt7996_dev *mt7996_mmio_probe(struct device *pdev,
+ 	if (ret)
+ 		goto error;
+ 
+-	tasklet_setup(&mdev->irq_tasklet, mt7996_irq_tasklet);
++	INIT_WORK(&mdev->irq_work, mt7996_irq_work);
+ 
+ 	mt76_wr(dev, MT_INT_MASK_CSR, 0);
+ 
+diff --git a/drivers/net/wireless/mediatek/mt7601u/dma.c b/drivers/net/wireless/mediatek/mt7601u/dma.c
+index 773a1cc2f852..b3e5cba30e51 100644
+--- a/drivers/net/wireless/mediatek/mt7601u/dma.c
++++ b/drivers/net/wireless/mediatek/mt7601u/dma.c
+@@ -194,7 +194,7 @@ static void mt7601u_complete_rx(struct urb *urb)
+ 	struct mt7601u_rx_queue *q = &dev->rx_q;
+ 	unsigned long flags;
+ 
+-	/* do no schedule rx tasklet if urb has been unlinked
++	/* do no schedule rx work if urb has been unlinked
+ 	 * or the device has been removed
+ 	 */
+ 	switch (urb->status) {
+@@ -217,14 +217,14 @@ static void mt7601u_complete_rx(struct urb *urb)
+ 
+ 	q->end = (q->end + 1) % q->entries;
+ 	q->pending++;
+-	tasklet_schedule(&dev->rx_tasklet);
++	queue_work(system_bh_wq, &dev->rx_work);
+ out:
+ 	spin_unlock_irqrestore(&dev->rx_lock, flags);
+ }
+ 
+-static void mt7601u_rx_tasklet(struct tasklet_struct *t)
++static void mt7601u_rx_work(struct work_struct *t)
+ {
+-	struct mt7601u_dev *dev = from_tasklet(dev, t, rx_tasklet);
++	struct mt7601u_dev *dev = from_work(dev, t, rx_work);
+ 	struct mt7601u_dma_buf_rx *e;
+ 
+ 	while ((e = mt7601u_rx_get_pending_entry(dev))) {
+@@ -266,7 +266,7 @@ static void mt7601u_complete_tx(struct urb *urb)
+ 	trace_mt_tx_dma_done(dev, skb);
+ 
+ 	__skb_queue_tail(&dev->tx_skb_done, skb);
+-	tasklet_schedule(&dev->tx_tasklet);
++	queue_work(system_bh_wq, &dev->tx_work);
+ 
+ 	if (q->used == q->entries - q->entries / 8)
+ 		ieee80211_wake_queue(dev->hw, skb_get_queue_mapping(skb));
+@@ -277,9 +277,9 @@ static void mt7601u_complete_tx(struct urb *urb)
+ 	spin_unlock_irqrestore(&dev->tx_lock, flags);
+ }
+ 
+-static void mt7601u_tx_tasklet(struct tasklet_struct *t)
++static void mt7601u_tx_work(struct work_struct *t)
+ {
+-	struct mt7601u_dev *dev = from_tasklet(dev, t, tx_tasklet);
++	struct mt7601u_dev *dev = from_work(dev, t, tx_work);
+ 	struct sk_buff_head skbs;
+ 	unsigned long flags;
+ 
+@@ -518,8 +518,8 @@ int mt7601u_dma_init(struct mt7601u_dev *dev)
+ {
+ 	int ret;
+ 
+-	tasklet_setup(&dev->tx_tasklet, mt7601u_tx_tasklet);
+-	tasklet_setup(&dev->rx_tasklet, mt7601u_rx_tasklet);
++	INIT_WORK(&dev->tx_work, mt7601u_tx_work);
++	INIT_WORK(&dev->rx_work, mt7601u_rx_work);
+ 
+ 	ret = mt7601u_alloc_tx(dev);
+ 	if (ret)
+@@ -542,10 +542,10 @@ void mt7601u_dma_cleanup(struct mt7601u_dev *dev)
+ {
+ 	mt7601u_kill_rx(dev);
+ 
+-	tasklet_kill(&dev->rx_tasklet);
++	cancel_work_sync(&dev->rx_work);
+ 
+ 	mt7601u_free_rx(dev);
+ 	mt7601u_free_tx(dev);
+ 
+-	tasklet_kill(&dev->tx_tasklet);
++	cancel_work_sync(&dev->tx_work);
+ }
+diff --git a/drivers/net/wireless/mediatek/mt7601u/mt7601u.h b/drivers/net/wireless/mediatek/mt7601u/mt7601u.h
+index 118d43707853..ddc4a6fb7bcf 100644
+--- a/drivers/net/wireless/mediatek/mt7601u/mt7601u.h
++++ b/drivers/net/wireless/mediatek/mt7601u/mt7601u.h
+@@ -16,6 +16,7 @@
+ #include <net/mac80211.h>
+ #include <linux/debugfs.h>
+ #include <linux/average.h>
++#include <linux/workqueue.h>
+ 
+ #include "regs.h"
+ 
+@@ -197,7 +198,7 @@ struct mt7601u_dev {
+ 
+ 	/* TX */
+ 	spinlock_t tx_lock;
+-	struct tasklet_struct tx_tasklet;
++	struct work_struct tx_work;
+ 	struct mt7601u_tx_queue *tx_q;
+ 	struct sk_buff_head tx_skb_done;
+ 
+@@ -205,7 +206,7 @@ struct mt7601u_dev {
+ 
+ 	/* RX */
+ 	spinlock_t rx_lock;
+-	struct tasklet_struct rx_tasklet;
++	struct work_struct rx_work;
+ 	struct mt7601u_rx_queue rx_q;
+ 
+ 	/* Connection monitoring things */
+diff --git a/drivers/net/wireless/quantenna/qtnfmac/pcie/pcie.c b/drivers/net/wireless/quantenna/qtnfmac/pcie/pcie.c
+index 9ad4c120fa28..566a02ba6dba 100644
+--- a/drivers/net/wireless/quantenna/qtnfmac/pcie/pcie.c
++++ b/drivers/net/wireless/quantenna/qtnfmac/pcie/pcie.c
+@@ -416,7 +416,7 @@ static void qtnf_pcie_remove(struct pci_dev *dev)
+ 
+ 	netif_napi_del(&bus->mux_napi);
+ 	destroy_workqueue(priv->workqueue);
+-	tasklet_kill(&priv->reclaim_tq);
++	cancel_work_sync(&priv->reclaim_tq);
+ 
+ 	qtnf_pcie_free_shm_ipc(priv);
+ 	qtnf_debugfs_remove(bus);
+diff --git a/drivers/net/wireless/quantenna/qtnfmac/pcie/pcie_priv.h b/drivers/net/wireless/quantenna/qtnfmac/pcie/pcie_priv.h
+index 2a6a928e13bd..079002660b9b 100644
+--- a/drivers/net/wireless/quantenna/qtnfmac/pcie/pcie_priv.h
++++ b/drivers/net/wireless/quantenna/qtnfmac/pcie/pcie_priv.h
+@@ -10,6 +10,7 @@
+ #include <linux/skbuff.h>
+ #include <linux/workqueue.h>
+ #include <linux/interrupt.h>
++#include <linux/workqueue.h>
+ 
+ #include "shm_ipc.h"
+ #include "bus.h"
+@@ -34,7 +35,7 @@ struct qtnf_pcie_bus_priv {
+ 	spinlock_t tx_lock;
+ 
+ 	struct workqueue_struct *workqueue;
+-	struct tasklet_struct reclaim_tq;
++	struct work_struct reclaim_tq;
+ 
+ 	void __iomem *sysctl_bar;
+ 	void __iomem *epmem_bar;
+diff --git a/drivers/net/wireless/quantenna/qtnfmac/pcie/pearl_pcie.c b/drivers/net/wireless/quantenna/qtnfmac/pcie/pearl_pcie.c
+index 8c23a77d1671..2fd77a8e024e 100644
+--- a/drivers/net/wireless/quantenna/qtnfmac/pcie/pearl_pcie.c
++++ b/drivers/net/wireless/quantenna/qtnfmac/pcie/pearl_pcie.c
+@@ -13,6 +13,7 @@
+ #include <linux/spinlock.h>
+ #include <linux/circ_buf.h>
+ #include <linux/log2.h>
++#include <linux/workqueue.h>
+ 
+ #include "pcie_priv.h"
+ #include "pearl_pcie_regs.h"
+@@ -672,7 +673,7 @@ static irqreturn_t qtnf_pcie_pearl_interrupt(int irq, void *data)
+ 
+ 	if (status & PCIE_HDP_INT_TX_BITS) {
+ 		qtnf_dis_txdone_irq(ps);
+-		tasklet_hi_schedule(&priv->reclaim_tq);
++		queue_work(system_bh_highpri_wq, &priv->reclaim_tq);
+ 	}
+ 
+ irq_done:
+@@ -809,7 +810,7 @@ qtnf_pcie_data_tx_timeout(struct qtnf_bus *bus, struct net_device *ndev)
+ {
+ 	struct qtnf_pcie_pearl_state *ps = (void *)get_bus_priv(bus);
+ 
+-	tasklet_hi_schedule(&ps->base.reclaim_tq);
++	queue_work(system_bh_highpri_wq, &ps->base.reclaim_tq);
+ }
+ 
+ static void qtnf_pcie_data_rx_start(struct qtnf_bus *bus)
+@@ -1091,9 +1092,9 @@ static void qtnf_pearl_fw_work_handler(struct work_struct *work)
+ 	put_device(&pdev->dev);
+ }
+ 
+-static void qtnf_pearl_reclaim_tasklet_fn(struct tasklet_struct *t)
++static void qtnf_pearl_reclaim_work_fn(struct work_struct *t)
+ {
+-	struct qtnf_pcie_pearl_state *ps = from_tasklet(ps, t, base.reclaim_tq);
++	struct qtnf_pcie_pearl_state *ps = from_work(ps, t, base.reclaim_tq);
+ 
+ 	qtnf_pearl_data_tx_reclaim(ps);
+ 	qtnf_en_txdone_irq(ps);
+@@ -1145,7 +1146,7 @@ static int qtnf_pcie_pearl_probe(struct qtnf_bus *bus, unsigned int tx_bd_size,
+ 		return ret;
+ 	}
+ 
+-	tasklet_setup(&ps->base.reclaim_tq, qtnf_pearl_reclaim_tasklet_fn);
++	INIT_WORK(&ps->base.reclaim_tq, qtnf_pearl_reclaim_work_fn);
+ 	netif_napi_add_weight(&bus->mux_dev, &bus->mux_napi,
+ 			      qtnf_pcie_pearl_rx_poll, 10);
+ 
+diff --git a/drivers/net/wireless/quantenna/qtnfmac/pcie/topaz_pcie.c b/drivers/net/wireless/quantenna/qtnfmac/pcie/topaz_pcie.c
+index d83362578374..5886126d4c05 100644
+--- a/drivers/net/wireless/quantenna/qtnfmac/pcie/topaz_pcie.c
++++ b/drivers/net/wireless/quantenna/qtnfmac/pcie/topaz_pcie.c
+@@ -12,6 +12,7 @@
+ #include <linux/completion.h>
+ #include <linux/spinlock.h>
+ #include <linux/circ_buf.h>
++#include <linux/workqueue.h>
+ 
+ #include "pcie_priv.h"
+ #include "topaz_pcie_regs.h"
+@@ -461,7 +462,7 @@ static void qtnf_try_stop_xmit(struct qtnf_bus *bus, struct net_device *ndev)
+ 	       TOPAZ_LH_IPC4_INT(ts->base.sysctl_bar));
+ 
+ 	/* schedule reclaim attempt */
+-	tasklet_hi_schedule(&ts->base.reclaim_tq);
++	queue_work(system_bh_highpri_wq, &ts->base.reclaim_tq);
+ }
+ 
+ static void qtnf_try_wake_xmit(struct qtnf_bus *bus, struct net_device *ndev)
+@@ -584,7 +585,7 @@ static irqreturn_t qtnf_pcie_topaz_interrupt(int irq, void *data)
+ 		__napi_schedule(&bus->mux_napi);
+ 	}
+ 
+-	tasklet_hi_schedule(&priv->reclaim_tq);
++	queue_work(system_bh_highpri_wq, &priv->reclaim_tq);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -722,7 +723,7 @@ qtnf_pcie_data_tx_timeout(struct qtnf_bus *bus, struct net_device *ndev)
+ 	struct qtnf_pcie_topaz_state *ts = get_bus_priv(bus);
+ 
+ 	qtnf_try_wake_xmit(bus, ndev);
+-	tasklet_hi_schedule(&ts->base.reclaim_tq);
++	queue_work(system_bh_highpri_wq, &ts->base.reclaim_tq);
+ }
+ 
+ static void qtnf_pcie_data_rx_start(struct qtnf_bus *bus)
+@@ -1105,9 +1106,9 @@ static void qtnf_topaz_fw_work_handler(struct work_struct *work)
+ 	put_device(&pdev->dev);
+ }
+ 
+-static void qtnf_reclaim_tasklet_fn(struct tasklet_struct *t)
++static void qtnf_reclaim_work_fn(struct work_struct *t)
+ {
+-	struct qtnf_pcie_topaz_state *ts = from_tasklet(ts, t, base.reclaim_tq);
++	struct qtnf_pcie_topaz_state *ts = from_work(ts, t, base.reclaim_tq);
+ 
+ 	qtnf_topaz_data_tx_reclaim(ts);
+ }
+@@ -1158,7 +1159,7 @@ static int qtnf_pcie_topaz_probe(struct qtnf_bus *bus,
+ 		return ret;
+ 	}
+ 
+-	tasklet_setup(&ts->base.reclaim_tq, qtnf_reclaim_tasklet_fn);
++	INIT_WORK(&ts->base.reclaim_tq, qtnf_reclaim_work_fn);
+ 	netif_napi_add_weight(&bus->mux_dev, &bus->mux_napi,
+ 			      qtnf_topaz_rx_poll, 10);
+ 
+diff --git a/drivers/net/wireless/ralink/rt2x00/rt2400pci.c b/drivers/net/wireless/ralink/rt2x00/rt2400pci.c
+index 13dd672b825e..a7b2ce8f1531 100644
+--- a/drivers/net/wireless/ralink/rt2x00/rt2400pci.c
++++ b/drivers/net/wireless/ralink/rt2x00/rt2400pci.c
+@@ -18,6 +18,7 @@
+ #include <linux/pci.h>
+ #include <linux/eeprom_93cx6.h>
+ #include <linux/slab.h>
++#include <linux/workqueue.h>
+ 
+ #include "rt2x00.h"
+ #include "rt2x00mmio.h"
+@@ -699,9 +700,9 @@ static void rt2400pci_stop_queue(struct data_queue *queue)
+ 		rt2x00mmio_register_write(rt2x00dev, CSR14, reg);
+ 
+ 		/*
+-		 * Wait for possibly running tbtt tasklets.
++		 * Wait for possibly running tbtt works.
+ 		 */
+-		tasklet_kill(&rt2x00dev->tbtt_tasklet);
++		cancel_work_sync(&rt2x00dev->tbtt_work);
+ 		break;
+ 	default:
+ 		break;
+@@ -988,12 +989,12 @@ static void rt2400pci_toggle_irq(struct rt2x00_dev *rt2x00dev,
+ 
+ 	if (state == STATE_RADIO_IRQ_OFF) {
+ 		/*
+-		 * Ensure that all tasklets are finished before
++		 * Ensure that all works are finished before
+ 		 * disabling the interrupts.
+ 		 */
+-		tasklet_kill(&rt2x00dev->txstatus_tasklet);
+-		tasklet_kill(&rt2x00dev->rxdone_tasklet);
+-		tasklet_kill(&rt2x00dev->tbtt_tasklet);
++		cancel_work_sync(&rt2x00dev->txstatus_work);
++		cancel_work_sync(&rt2x00dev->rxdone_work);
++		cancel_work_sync(&rt2x00dev->tbtt_work);
+ 	}
+ }
+ 
+@@ -1319,10 +1320,10 @@ static inline void rt2400pci_enable_interrupt(struct rt2x00_dev *rt2x00dev,
+ 	spin_unlock_irq(&rt2x00dev->irqmask_lock);
+ }
+ 
+-static void rt2400pci_txstatus_tasklet(struct tasklet_struct *t)
++static void rt2400pci_txstatus_work(struct work_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t,
+-						    txstatus_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t,
++						    txstatus_work);
+ 	u32 reg;
+ 
+ 	/*
+@@ -1348,20 +1349,20 @@ static void rt2400pci_txstatus_tasklet(struct tasklet_struct *t)
+ 	}
+ }
+ 
+-static void rt2400pci_tbtt_tasklet(struct tasklet_struct *t)
++static void rt2400pci_tbtt_work(struct work_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t, tbtt_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t, tbtt_work);
+ 	rt2x00lib_beacondone(rt2x00dev);
+ 	if (test_bit(DEVICE_STATE_ENABLED_RADIO, &rt2x00dev->flags))
+ 		rt2400pci_enable_interrupt(rt2x00dev, CSR8_TBCN_EXPIRE);
+ }
+ 
+-static void rt2400pci_rxdone_tasklet(struct tasklet_struct *t)
++static void rt2400pci_rxdone_work(struct work_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t,
+-						    rxdone_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t,
++						    rxdone_work);
+ 	if (rt2x00mmio_rxdone(rt2x00dev))
+-		tasklet_schedule(&rt2x00dev->rxdone_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->rxdone_work);
+ 	else if (test_bit(DEVICE_STATE_ENABLED_RADIO, &rt2x00dev->flags))
+ 		rt2400pci_enable_interrupt(rt2x00dev, CSR8_RXDONE);
+ }
+@@ -1387,18 +1388,18 @@ static irqreturn_t rt2400pci_interrupt(int irq, void *dev_instance)
+ 	mask = reg;
+ 
+ 	/*
+-	 * Schedule tasklets for interrupt handling.
++	 * Schedule works for interrupt handling.
+ 	 */
+ 	if (rt2x00_get_field32(reg, CSR7_TBCN_EXPIRE))
+-		tasklet_hi_schedule(&rt2x00dev->tbtt_tasklet);
++		queue_work(system_bh_highpri_wq, &rt2x00dev->tbtt_work);
+ 
+ 	if (rt2x00_get_field32(reg, CSR7_RXDONE))
+-		tasklet_schedule(&rt2x00dev->rxdone_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->rxdone_work);
+ 
+ 	if (rt2x00_get_field32(reg, CSR7_TXDONE_ATIMRING) ||
+ 	    rt2x00_get_field32(reg, CSR7_TXDONE_PRIORING) ||
+ 	    rt2x00_get_field32(reg, CSR7_TXDONE_TXRING)) {
+-		tasklet_schedule(&rt2x00dev->txstatus_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->txstatus_work);
+ 		/*
+ 		 * Mask out all txdone interrupts.
+ 		 */
+@@ -1408,8 +1409,8 @@ static irqreturn_t rt2400pci_interrupt(int irq, void *dev_instance)
+ 	}
+ 
+ 	/*
+-	 * Disable all interrupts for which a tasklet was scheduled right now,
+-	 * the tasklet will reenable the appropriate interrupts.
++	 * Disable all interrupts for which a work was scheduled right now,
++	 * the work will reenable the appropriate interrupts.
+ 	 */
+ 	spin_lock(&rt2x00dev->irqmask_lock);
+ 
+@@ -1730,9 +1731,9 @@ static const struct ieee80211_ops rt2400pci_mac80211_ops = {
+ 
+ static const struct rt2x00lib_ops rt2400pci_rt2x00_ops = {
+ 	.irq_handler		= rt2400pci_interrupt,
+-	.txstatus_tasklet	= rt2400pci_txstatus_tasklet,
+-	.tbtt_tasklet		= rt2400pci_tbtt_tasklet,
+-	.rxdone_tasklet		= rt2400pci_rxdone_tasklet,
++	.txstatus_work	= rt2400pci_txstatus_work,
++	.tbtt_work		= rt2400pci_tbtt_work,
++	.rxdone_work		= rt2400pci_rxdone_work,
+ 	.probe_hw		= rt2400pci_probe_hw,
+ 	.initialize		= rt2x00mmio_initialize,
+ 	.uninitialize		= rt2x00mmio_uninitialize,
+diff --git a/drivers/net/wireless/ralink/rt2x00/rt2500pci.c b/drivers/net/wireless/ralink/rt2x00/rt2500pci.c
+index ecddda4c471e..de3283facafe 100644
+--- a/drivers/net/wireless/ralink/rt2x00/rt2500pci.c
++++ b/drivers/net/wireless/ralink/rt2x00/rt2500pci.c
+@@ -18,6 +18,7 @@
+ #include <linux/pci.h>
+ #include <linux/eeprom_93cx6.h>
+ #include <linux/slab.h>
++#include <linux/workqueue.h>
+ 
+ #include "rt2x00.h"
+ #include "rt2x00mmio.h"
+@@ -788,9 +789,9 @@ static void rt2500pci_stop_queue(struct data_queue *queue)
+ 		rt2x00mmio_register_write(rt2x00dev, CSR14, reg);
+ 
+ 		/*
+-		 * Wait for possibly running tbtt tasklets.
++		 * Wait for possibly running tbtt works.
+ 		 */
+-		tasklet_kill(&rt2x00dev->tbtt_tasklet);
++		cancel_work_sync(&rt2x00dev->tbtt_work);
+ 		break;
+ 	default:
+ 		break;
+@@ -1142,11 +1143,11 @@ static void rt2500pci_toggle_irq(struct rt2x00_dev *rt2x00dev,
+ 
+ 	if (state == STATE_RADIO_IRQ_OFF) {
+ 		/*
+-		 * Ensure that all tasklets are finished.
++		 * Ensure that all works are finished.
+ 		 */
+-		tasklet_kill(&rt2x00dev->txstatus_tasklet);
+-		tasklet_kill(&rt2x00dev->rxdone_tasklet);
+-		tasklet_kill(&rt2x00dev->tbtt_tasklet);
++		cancel_work_sync(&rt2x00dev->txstatus_work);
++		cancel_work_sync(&rt2x00dev->rxdone_work);
++		cancel_work_sync(&rt2x00dev->tbtt_work);
+ 	}
+ }
+ 
+@@ -1447,10 +1448,10 @@ static inline void rt2500pci_enable_interrupt(struct rt2x00_dev *rt2x00dev,
+ 	spin_unlock_irq(&rt2x00dev->irqmask_lock);
+ }
+ 
+-static void rt2500pci_txstatus_tasklet(struct tasklet_struct *t)
++static void rt2500pci_txstatus_work(struct work_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t,
+-						    txstatus_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t,
++						    txstatus_work);
+ 	u32 reg;
+ 
+ 	/*
+@@ -1476,20 +1477,20 @@ static void rt2500pci_txstatus_tasklet(struct tasklet_struct *t)
+ 	}
+ }
+ 
+-static void rt2500pci_tbtt_tasklet(struct tasklet_struct *t)
++static void rt2500pci_tbtt_work(struct work_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t, tbtt_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t, tbtt_work);
+ 	rt2x00lib_beacondone(rt2x00dev);
+ 	if (test_bit(DEVICE_STATE_ENABLED_RADIO, &rt2x00dev->flags))
+ 		rt2500pci_enable_interrupt(rt2x00dev, CSR8_TBCN_EXPIRE);
+ }
+ 
+-static void rt2500pci_rxdone_tasklet(struct tasklet_struct *t)
++static void rt2500pci_rxdone_work(struct work_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t,
+-						    rxdone_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t,
++						    rxdone_work);
+ 	if (rt2x00mmio_rxdone(rt2x00dev))
+-		tasklet_schedule(&rt2x00dev->rxdone_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->rxdone_work);
+ 	else if (test_bit(DEVICE_STATE_ENABLED_RADIO, &rt2x00dev->flags))
+ 		rt2500pci_enable_interrupt(rt2x00dev, CSR8_RXDONE);
+ }
+@@ -1515,18 +1516,18 @@ static irqreturn_t rt2500pci_interrupt(int irq, void *dev_instance)
+ 	mask = reg;
+ 
+ 	/*
+-	 * Schedule tasklets for interrupt handling.
++	 * Schedule works for interrupt handling.
+ 	 */
+ 	if (rt2x00_get_field32(reg, CSR7_TBCN_EXPIRE))
+-		tasklet_hi_schedule(&rt2x00dev->tbtt_tasklet);
++		queue_work(system_bh_highpri_wq, &rt2x00dev->tbtt_work);
+ 
+ 	if (rt2x00_get_field32(reg, CSR7_RXDONE))
+-		tasklet_schedule(&rt2x00dev->rxdone_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->rxdone_work);
+ 
+ 	if (rt2x00_get_field32(reg, CSR7_TXDONE_ATIMRING) ||
+ 	    rt2x00_get_field32(reg, CSR7_TXDONE_PRIORING) ||
+ 	    rt2x00_get_field32(reg, CSR7_TXDONE_TXRING)) {
+-		tasklet_schedule(&rt2x00dev->txstatus_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->txstatus_work);
+ 		/*
+ 		 * Mask out all txdone interrupts.
+ 		 */
+@@ -1536,8 +1537,8 @@ static irqreturn_t rt2500pci_interrupt(int irq, void *dev_instance)
+ 	}
+ 
+ 	/*
+-	 * Disable all interrupts for which a tasklet was scheduled right now,
+-	 * the tasklet will reenable the appropriate interrupts.
++	 * Disable all interrupts for which a work was scheduled right now,
++	 * the work will reenable the appropriate interrupts.
+ 	 */
+ 	spin_lock(&rt2x00dev->irqmask_lock);
+ 
+@@ -2028,9 +2029,9 @@ static const struct ieee80211_ops rt2500pci_mac80211_ops = {
+ 
+ static const struct rt2x00lib_ops rt2500pci_rt2x00_ops = {
+ 	.irq_handler		= rt2500pci_interrupt,
+-	.txstatus_tasklet	= rt2500pci_txstatus_tasklet,
+-	.tbtt_tasklet		= rt2500pci_tbtt_tasklet,
+-	.rxdone_tasklet		= rt2500pci_rxdone_tasklet,
++	.txstatus_work	= rt2500pci_txstatus_work,
++	.tbtt_work		= rt2500pci_tbtt_work,
++	.rxdone_work		= rt2500pci_rxdone_work,
+ 	.probe_hw		= rt2500pci_probe_hw,
+ 	.initialize		= rt2x00mmio_initialize,
+ 	.uninitialize		= rt2x00mmio_uninitialize,
+diff --git a/drivers/net/wireless/ralink/rt2x00/rt2800mmio.c b/drivers/net/wireless/ralink/rt2x00/rt2800mmio.c
+index 5323acff962a..5da81d006c45 100644
+--- a/drivers/net/wireless/ralink/rt2x00/rt2800mmio.c
++++ b/drivers/net/wireless/ralink/rt2x00/rt2800mmio.c
+@@ -17,6 +17,7 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/export.h>
++#include <linux/workqueue.h>
+ 
+ #include "rt2x00.h"
+ #include "rt2x00mmio.h"
+@@ -210,19 +211,19 @@ static inline void rt2800mmio_enable_interrupt(struct rt2x00_dev *rt2x00dev,
+ 	spin_unlock_irq(&rt2x00dev->irqmask_lock);
+ }
+ 
+-void rt2800mmio_pretbtt_tasklet(struct tasklet_struct *t)
++void rt2800mmio_pretbtt_work(struct tasklet_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t,
+-						    pretbtt_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t,
++						    pretbtt_work);
+ 	rt2x00lib_pretbtt(rt2x00dev);
+ 	if (test_bit(DEVICE_STATE_ENABLED_RADIO, &rt2x00dev->flags))
+ 		rt2800mmio_enable_interrupt(rt2x00dev, INT_MASK_CSR_PRE_TBTT);
+ }
+-EXPORT_SYMBOL_GPL(rt2800mmio_pretbtt_tasklet);
++EXPORT_SYMBOL_GPL(rt2800mmio_pretbtt_work);
+ 
+-void rt2800mmio_tbtt_tasklet(struct tasklet_struct *t)
++void rt2800mmio_tbtt_work(struct tasklet_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t, tbtt_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t, tbtt_work);
+ 	struct rt2800_drv_data *drv_data = rt2x00dev->drv_data;
+ 	u32 reg;
+ 
+@@ -253,29 +254,29 @@ void rt2800mmio_tbtt_tasklet(struct tasklet_struct *t)
+ 	if (test_bit(DEVICE_STATE_ENABLED_RADIO, &rt2x00dev->flags))
+ 		rt2800mmio_enable_interrupt(rt2x00dev, INT_MASK_CSR_TBTT);
+ }
+-EXPORT_SYMBOL_GPL(rt2800mmio_tbtt_tasklet);
++EXPORT_SYMBOL_GPL(rt2800mmio_tbtt_work);
+ 
+-void rt2800mmio_rxdone_tasklet(struct tasklet_struct *t)
++void rt2800mmio_rxdone_work(struct tasklet_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t,
+-						    rxdone_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t,
++						    rxdone_work);
+ 	if (rt2x00mmio_rxdone(rt2x00dev))
+-		tasklet_schedule(&rt2x00dev->rxdone_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->rxdone_work);
+ 	else if (test_bit(DEVICE_STATE_ENABLED_RADIO, &rt2x00dev->flags))
+ 		rt2800mmio_enable_interrupt(rt2x00dev, INT_MASK_CSR_RX_DONE);
+ }
+-EXPORT_SYMBOL_GPL(rt2800mmio_rxdone_tasklet);
++EXPORT_SYMBOL_GPL(rt2800mmio_rxdone_work);
+ 
+-void rt2800mmio_autowake_tasklet(struct tasklet_struct *t)
++void rt2800mmio_autowake_work(struct tasklet_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t,
+-						    autowake_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t,
++						    autowake_work);
+ 	rt2800mmio_wakeup(rt2x00dev);
+ 	if (test_bit(DEVICE_STATE_ENABLED_RADIO, &rt2x00dev->flags))
+ 		rt2800mmio_enable_interrupt(rt2x00dev,
+ 					    INT_MASK_CSR_AUTO_WAKEUP);
+ }
+-EXPORT_SYMBOL_GPL(rt2800mmio_autowake_tasklet);
++EXPORT_SYMBOL_GPL(rt2800mmio_autowake_work);
+ 
+ static void rt2800mmio_fetch_txstatus(struct rt2x00_dev *rt2x00dev)
+ {
+@@ -289,8 +290,8 @@ static void rt2800mmio_fetch_txstatus(struct rt2x00_dev *rt2x00dev)
+ 	 *
+ 	 * Hence, read the TX_STA_FIFO register and copy all tx status
+ 	 * reports into a kernel FIFO which is handled in the txstatus
+-	 * tasklet. We use a tasklet to process the tx status reports
+-	 * because we can schedule the tasklet multiple times (when the
++	 * work. We use a work to process the tx status reports
++	 * because we can schedule the work multiple times (when the
+ 	 * interrupt fires again during tx status processing).
+ 	 *
+ 	 * We also read statuses from tx status timeout timer, use
+@@ -310,18 +311,18 @@ static void rt2800mmio_fetch_txstatus(struct rt2x00_dev *rt2x00dev)
+ 	spin_unlock_irqrestore(&rt2x00dev->irqmask_lock, flags);
+ }
+ 
+-void rt2800mmio_txstatus_tasklet(struct tasklet_struct *t)
++void rt2800mmio_txstatus_work(struct tasklet_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t,
+-						    txstatus_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t,
++						    txstatus_work);
+ 
+ 	rt2800_txdone(rt2x00dev, 16);
+ 
+ 	if (!kfifo_is_empty(&rt2x00dev->txstatus_fifo))
+-		tasklet_schedule(&rt2x00dev->txstatus_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->txstatus_work);
+ 
+ }
+-EXPORT_SYMBOL_GPL(rt2800mmio_txstatus_tasklet);
++EXPORT_SYMBOL_GPL(rt2800mmio_txstatus_work);
+ 
+ irqreturn_t rt2800mmio_interrupt(int irq, void *dev_instance)
+ {
+@@ -349,24 +350,24 @@ irqreturn_t rt2800mmio_interrupt(int irq, void *dev_instance)
+ 		rt2x00_set_field32(&mask, INT_MASK_CSR_TX_FIFO_STATUS, 1);
+ 		rt2800mmio_fetch_txstatus(rt2x00dev);
+ 		if (!kfifo_is_empty(&rt2x00dev->txstatus_fifo))
+-			tasklet_schedule(&rt2x00dev->txstatus_tasklet);
++			queue_work(system_bh_wq, &rt2x00dev->txstatus_work);
+ 	}
+ 
+ 	if (rt2x00_get_field32(reg, INT_SOURCE_CSR_PRE_TBTT))
+-		tasklet_hi_schedule(&rt2x00dev->pretbtt_tasklet);
++		queue_work(system_bh_highpri_wq, &rt2x00dev->pretbtt_work);
+ 
+ 	if (rt2x00_get_field32(reg, INT_SOURCE_CSR_TBTT))
+-		tasklet_hi_schedule(&rt2x00dev->tbtt_tasklet);
++		queue_work(system_bh_highpri_wq, &rt2x00dev->tbtt_work);
+ 
+ 	if (rt2x00_get_field32(reg, INT_SOURCE_CSR_RX_DONE))
+-		tasklet_schedule(&rt2x00dev->rxdone_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->rxdone_work);
+ 
+ 	if (rt2x00_get_field32(reg, INT_SOURCE_CSR_AUTO_WAKEUP))
+-		tasklet_schedule(&rt2x00dev->autowake_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->autowake_work);
+ 
+ 	/*
+-	 * Disable all interrupts for which a tasklet was scheduled right now,
+-	 * the tasklet will reenable the appropriate interrupts.
++	 * Disable all interrupts for which a work was scheduled right now,
++	 * the work will reenable the appropriate interrupts.
+ 	 */
+ 	spin_lock(&rt2x00dev->irqmask_lock);
+ 	reg = rt2x00mmio_register_read(rt2x00dev, INT_MASK_CSR);
+@@ -407,13 +408,13 @@ void rt2800mmio_toggle_irq(struct rt2x00_dev *rt2x00dev,
+ 
+ 	if (state == STATE_RADIO_IRQ_OFF) {
+ 		/*
+-		 * Wait for possibly running tasklets to finish.
++		 * Wait for possibly running works to finish.
+ 		 */
+-		tasklet_kill(&rt2x00dev->txstatus_tasklet);
+-		tasklet_kill(&rt2x00dev->rxdone_tasklet);
+-		tasklet_kill(&rt2x00dev->autowake_tasklet);
+-		tasklet_kill(&rt2x00dev->tbtt_tasklet);
+-		tasklet_kill(&rt2x00dev->pretbtt_tasklet);
++		cancel_work_sync(&rt2x00dev->txstatus_work);
++		cancel_work_sync(&rt2x00dev->rxdone_work);
++		cancel_work_sync(&rt2x00dev->autowake_work);
++		cancel_work_sync(&rt2x00dev->tbtt_work);
++		cancel_work_sync(&rt2x00dev->pretbtt_work);
+ 	}
+ }
+ EXPORT_SYMBOL_GPL(rt2800mmio_toggle_irq);
+@@ -509,7 +510,7 @@ void rt2800mmio_flush_queue(struct data_queue *queue, bool drop)
+ 			break;
+ 
+ 		/*
+-		 * For TX queues schedule completion tasklet to catch
++		 * For TX queues schedule completion work to catch
+ 		 * tx status timeouts, othewise just wait.
+ 		 */
+ 		if (tx_queue)
+@@ -547,12 +548,12 @@ void rt2800mmio_stop_queue(struct data_queue *queue)
+ 		rt2x00mmio_register_write(rt2x00dev, INT_TIMER_EN, reg);
+ 
+ 		/*
+-		 * Wait for current invocation to finish. The tasklet
++		 * Wait for current invocation to finish. The work
+ 		 * won't be scheduled anymore afterwards since we disabled
+ 		 * the TBTT and PRE TBTT timer.
+ 		 */
+-		tasklet_kill(&rt2x00dev->tbtt_tasklet);
+-		tasklet_kill(&rt2x00dev->pretbtt_tasklet);
++		cancel_work_sync(&rt2x00dev->tbtt_work);
++		cancel_work_sync(&rt2x00dev->pretbtt_work);
+ 
+ 		break;
+ 	default:
+@@ -800,10 +801,10 @@ static void rt2800mmio_work_txdone(struct work_struct *work)
+ 	while (!kfifo_is_empty(&rt2x00dev->txstatus_fifo) ||
+ 	       rt2800_txstatus_timeout(rt2x00dev)) {
+ 
+-		tasklet_disable(&rt2x00dev->txstatus_tasklet);
++		disable_work_sync(&rt2x00dev->txstatus_work);
+ 		rt2800_txdone(rt2x00dev, UINT_MAX);
+ 		rt2800_txdone_nostatus(rt2x00dev);
+-		tasklet_enable(&rt2x00dev->txstatus_tasklet);
++		enable_and_queue_work(system_bh_wq, &rt2x00dev->txstatus_work);
+ 	}
+ 
+ 	if (rt2800_txstatus_pending(rt2x00dev))
+@@ -824,7 +825,7 @@ static enum hrtimer_restart rt2800mmio_tx_sta_fifo_timeout(struct hrtimer *timer
+ 
+ 	rt2800mmio_fetch_txstatus(rt2x00dev);
+ 	if (!kfifo_is_empty(&rt2x00dev->txstatus_fifo))
+-		tasklet_schedule(&rt2x00dev->txstatus_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->txstatus_work);
+ 	else
+ 		queue_work(rt2x00dev->workqueue, &rt2x00dev->txdone_work);
+ out:
+diff --git a/drivers/net/wireless/ralink/rt2x00/rt2800mmio.h b/drivers/net/wireless/ralink/rt2x00/rt2800mmio.h
+index 05708950f24d..9279802db7ed 100644
+--- a/drivers/net/wireless/ralink/rt2x00/rt2800mmio.h
++++ b/drivers/net/wireless/ralink/rt2x00/rt2800mmio.h
+@@ -126,11 +126,11 @@ void rt2800mmio_fill_rxdone(struct queue_entry *entry,
+ 			    struct rxdone_entry_desc *rxdesc);
+ 
+ /* Interrupt functions */
+-void rt2800mmio_txstatus_tasklet(struct tasklet_struct *t);
+-void rt2800mmio_pretbtt_tasklet(struct tasklet_struct *t);
+-void rt2800mmio_tbtt_tasklet(struct tasklet_struct *t);
+-void rt2800mmio_rxdone_tasklet(struct tasklet_struct *t);
+-void rt2800mmio_autowake_tasklet(struct tasklet_struct *t);
++void rt2800mmio_txstatus_work(struct work_struct *t);
++void rt2800mmio_pretbtt_work(struct work_struct *t);
++void rt2800mmio_tbtt_work(struct work_struct *t);
++void rt2800mmio_rxdone_work(struct work_struct *t);
++void rt2800mmio_autowake_work(struct work_struct *t);
+ irqreturn_t rt2800mmio_interrupt(int irq, void *dev_instance);
+ void rt2800mmio_toggle_irq(struct rt2x00_dev *rt2x00dev,
+ 			   enum dev_state state);
+diff --git a/drivers/net/wireless/ralink/rt2x00/rt2x00.h b/drivers/net/wireless/ralink/rt2x00/rt2x00.h
+index 82af01448a0a..588e62466a4f 100644
+--- a/drivers/net/wireless/ralink/rt2x00/rt2x00.h
++++ b/drivers/net/wireless/ralink/rt2x00/rt2x00.h
+@@ -28,6 +28,7 @@
+ #include <linux/average.h>
+ #include <linux/usb.h>
+ #include <linux/clk.h>
++#include <linux/workqueue.h>
+ 
+ #include <net/mac80211.h>
+ 
+@@ -525,13 +526,13 @@ struct rt2x00lib_ops {
+ 	irq_handler_t irq_handler;
+ 
+ 	/*
+-	 * TX status tasklet handler.
++	 * TX status work handler.
+ 	 */
+-	void (*txstatus_tasklet) (struct tasklet_struct *t);
+-	void (*pretbtt_tasklet) (struct tasklet_struct *t);
+-	void (*tbtt_tasklet) (struct tasklet_struct *t);
+-	void (*rxdone_tasklet) (struct tasklet_struct *t);
+-	void (*autowake_tasklet) (struct tasklet_struct *t);
++	void (*txstatus_work) (struct work_struct *t);
++	void (*pretbtt_work) (struct work_struct *t);
++	void (*tbtt_work) (struct work_struct *t);
++	void (*rxdone_work) (struct work_struct *t);
++	void (*autowake_work) (struct work_struct *t);
+ 
+ 	/*
+ 	 * Device init handlers.
+@@ -982,7 +983,7 @@ struct rt2x00_dev {
+ 	const struct firmware *fw;
+ 
+ 	/*
+-	 * FIFO for storing tx status reports between isr and tasklet.
++	 * FIFO for storing tx status reports between isr and work.
+ 	 */
+ 	DECLARE_KFIFO_PTR(txstatus_fifo, u32);
+ 
+@@ -992,13 +993,13 @@ struct rt2x00_dev {
+ 	struct hrtimer txstatus_timer;
+ 
+ 	/*
+-	 * Tasklet for processing tx status reports (rt2800pci).
++	 * Work for processing tx status reports (rt2800pci).
+ 	 */
+-	struct tasklet_struct txstatus_tasklet;
+-	struct tasklet_struct pretbtt_tasklet;
+-	struct tasklet_struct tbtt_tasklet;
+-	struct tasklet_struct rxdone_tasklet;
+-	struct tasklet_struct autowake_tasklet;
++	struct work_struct txstatus_work;
++	struct work_struct pretbtt_work;
++	struct work_struct tbtt_work;
++	struct work_struct rxdone_work;
++	struct work_struct autowake_work;
+ 
+ 	/*
+ 	 * Used for VCO periodic calibration.
+diff --git a/drivers/net/wireless/ralink/rt2x00/rt2x00dev.c b/drivers/net/wireless/ralink/rt2x00/rt2x00dev.c
+index 9e7d9dbe954c..85725b1c81cf 100644
+--- a/drivers/net/wireless/ralink/rt2x00/rt2x00dev.c
++++ b/drivers/net/wireless/ralink/rt2x00/rt2x00dev.c
+@@ -1171,7 +1171,7 @@ static int rt2x00lib_probe_hw(struct rt2x00_dev *rt2x00dev)
+ 	}
+ 
+ 	/*
+-	 * Initialize tasklets if used by the driver. Tasklets are
++	 * Initialize works if used by the driver. Works are
+ 	 * disabled until the interrupts are turned on. The driver
+ 	 * has to handle that.
+ 	 */
+@@ -1519,11 +1519,11 @@ void rt2x00lib_remove_dev(struct rt2x00_dev *rt2x00dev)
+ 	/*
+ 	 * Kill the tx status tasklet.
+ 	 */
+-	tasklet_kill(&rt2x00dev->txstatus_tasklet);
+-	tasklet_kill(&rt2x00dev->pretbtt_tasklet);
+-	tasklet_kill(&rt2x00dev->tbtt_tasklet);
+-	tasklet_kill(&rt2x00dev->rxdone_tasklet);
+-	tasklet_kill(&rt2x00dev->autowake_tasklet);
++	cancel_work_sync(&rt2x00dev->txstatus_tasklet);
++	cancel_work_sync(&rt2x00dev->pretbtt_tasklet);
++	cancel_work_sync(&rt2x00dev->tbtt_tasklet);
++	cancel_work_sync(&rt2x00dev->rxdone_tasklet);
++	cancel_work_sync(&rt2x00dev->autowake_tasklet);
+ 
+ 	/*
+ 	 * Uninitialize device.
+diff --git a/drivers/net/wireless/ralink/rt2x00/rt61pci.c b/drivers/net/wireless/ralink/rt2x00/rt61pci.c
+index 483723bf514b..57bac54a274f 100644
+--- a/drivers/net/wireless/ralink/rt2x00/rt61pci.c
++++ b/drivers/net/wireless/ralink/rt2x00/rt61pci.c
+@@ -19,6 +19,7 @@
+ #include <linux/slab.h>
+ #include <linux/pci.h>
+ #include <linux/eeprom_93cx6.h>
++#include <linux/workqueue.h>
+ 
+ #include "rt2x00.h"
+ #include "rt2x00mmio.h"
+@@ -1131,9 +1132,9 @@ static void rt61pci_stop_queue(struct data_queue *queue)
+ 		rt2x00mmio_register_write(rt2x00dev, TXRX_CSR9, reg);
+ 
+ 		/*
+-		 * Wait for possibly running tbtt tasklets.
++		 * Wait for possibly running tbtt works.
+ 		 */
+-		tasklet_kill(&rt2x00dev->tbtt_tasklet);
++		cancel_work_sync(&rt2x00dev->tbtt_work);
+ 		break;
+ 	default:
+ 		break;
+@@ -1666,12 +1667,12 @@ static void rt61pci_toggle_irq(struct rt2x00_dev *rt2x00dev,
+ 
+ 	if (state == STATE_RADIO_IRQ_OFF) {
+ 		/*
+-		 * Ensure that all tasklets are finished.
++		 * Ensure that all works are finished.
+ 		 */
+-		tasklet_kill(&rt2x00dev->txstatus_tasklet);
+-		tasklet_kill(&rt2x00dev->rxdone_tasklet);
+-		tasklet_kill(&rt2x00dev->autowake_tasklet);
+-		tasklet_kill(&rt2x00dev->tbtt_tasklet);
++		cancel_work_sync(&rt2x00dev->txstatus_work);
++		cancel_work_sync(&rt2x00dev->rxdone_work);
++		cancel_work_sync(&rt2x00dev->autowake_work);
++		cancel_work_sync(&rt2x00dev->tbtt_work);
+ 	}
+ }
+ 
+@@ -2190,38 +2191,38 @@ static void rt61pci_enable_mcu_interrupt(struct rt2x00_dev *rt2x00dev,
+ 	spin_unlock_irq(&rt2x00dev->irqmask_lock);
+ }
+ 
+-static void rt61pci_txstatus_tasklet(struct tasklet_struct *t)
++static void rt61pci_txstatus_work(struct work_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t,
+-						    txstatus_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t,
++						    txstatus_work);
+ 
+ 	rt61pci_txdone(rt2x00dev);
+ 	if (test_bit(DEVICE_STATE_ENABLED_RADIO, &rt2x00dev->flags))
+ 		rt61pci_enable_interrupt(rt2x00dev, INT_MASK_CSR_TXDONE);
+ }
+ 
+-static void rt61pci_tbtt_tasklet(struct tasklet_struct *t)
++static void rt61pci_tbtt_work(struct work_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t, tbtt_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t, tbtt_work);
+ 	rt2x00lib_beacondone(rt2x00dev);
+ 	if (test_bit(DEVICE_STATE_ENABLED_RADIO, &rt2x00dev->flags))
+ 		rt61pci_enable_interrupt(rt2x00dev, INT_MASK_CSR_BEACON_DONE);
+ }
+ 
+-static void rt61pci_rxdone_tasklet(struct tasklet_struct *t)
++static void rt61pci_rxdone_work(struct work_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t,
+-						    rxdone_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t,
++						    rxdone_work);
+ 	if (rt2x00mmio_rxdone(rt2x00dev))
+-		tasklet_schedule(&rt2x00dev->rxdone_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->rxdone_work);
+ 	else if (test_bit(DEVICE_STATE_ENABLED_RADIO, &rt2x00dev->flags))
+ 		rt61pci_enable_interrupt(rt2x00dev, INT_MASK_CSR_RXDONE);
+ }
+ 
+-static void rt61pci_autowake_tasklet(struct tasklet_struct *t)
++static void rt61pci_autowake_work(struct work_struct *t)
+ {
+-	struct rt2x00_dev *rt2x00dev = from_tasklet(rt2x00dev, t,
+-						    autowake_tasklet);
++	struct rt2x00_dev *rt2x00dev = from_work(rt2x00dev, t,
++						    autowake_work);
+ 	rt61pci_wakeup(rt2x00dev);
+ 	rt2x00mmio_register_write(rt2x00dev,
+ 				  M2H_CMD_DONE_CSR, 0xffffffff);
+@@ -2252,19 +2253,19 @@ static irqreturn_t rt61pci_interrupt(int irq, void *dev_instance)
+ 		return IRQ_HANDLED;
+ 
+ 	/*
+-	 * Schedule tasklets for interrupt handling.
++	 * Schedule works for interrupt handling.
+ 	 */
+ 	if (rt2x00_get_field32(reg, INT_SOURCE_CSR_RXDONE))
+-		tasklet_schedule(&rt2x00dev->rxdone_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->rxdone_work);
+ 
+ 	if (rt2x00_get_field32(reg, INT_SOURCE_CSR_TXDONE))
+-		tasklet_schedule(&rt2x00dev->txstatus_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->txstatus_work);
+ 
+ 	if (rt2x00_get_field32(reg, INT_SOURCE_CSR_BEACON_DONE))
+-		tasklet_hi_schedule(&rt2x00dev->tbtt_tasklet);
++		queue_work(system_bh_highpri_wq, &rt2x00dev->tbtt_work);
+ 
+ 	if (rt2x00_get_field32(reg_mcu, MCU_INT_SOURCE_CSR_TWAKEUP))
+-		tasklet_schedule(&rt2x00dev->autowake_tasklet);
++		queue_work(system_bh_wq, &rt2x00dev->autowake_work);
+ 
+ 	/*
+ 	 * Since INT_MASK_CSR and INT_SOURCE_CSR use the same bits
+@@ -2275,8 +2276,8 @@ static irqreturn_t rt61pci_interrupt(int irq, void *dev_instance)
+ 	mask_mcu = reg_mcu;
+ 
+ 	/*
+-	 * Disable all interrupts for which a tasklet was scheduled right now,
+-	 * the tasklet will reenable the appropriate interrupts.
++	 * Disable all interrupts for which a work was scheduled right now,
++	 * the work will reenable the appropriate interrupts.
+ 	 */
+ 	spin_lock(&rt2x00dev->irqmask_lock);
+ 
+@@ -2897,10 +2898,10 @@ static const struct ieee80211_ops rt61pci_mac80211_ops = {
+ 
+ static const struct rt2x00lib_ops rt61pci_rt2x00_ops = {
+ 	.irq_handler		= rt61pci_interrupt,
+-	.txstatus_tasklet	= rt61pci_txstatus_tasklet,
+-	.tbtt_tasklet		= rt61pci_tbtt_tasklet,
+-	.rxdone_tasklet		= rt61pci_rxdone_tasklet,
+-	.autowake_tasklet	= rt61pci_autowake_tasklet,
++	.txstatus_work	= rt61pci_txstatus_work,
++	.tbtt_work		= rt61pci_tbtt_work,
++	.rxdone_work		= rt61pci_rxdone_work,
++	.autowake_work	= rt61pci_autowake_work,
+ 	.probe_hw		= rt61pci_probe_hw,
+ 	.get_firmware_name	= rt61pci_get_firmware_name,
+ 	.check_firmware		= rt61pci_check_firmware,
+diff --git a/drivers/net/wireless/realtek/rtlwifi/pci.c b/drivers/net/wireless/realtek/rtlwifi/pci.c
+index 96ce05bcf0b3..ba366e1d283b 100644
+--- a/drivers/net/wireless/realtek/rtlwifi/pci.c
++++ b/drivers/net/wireless/realtek/rtlwifi/pci.c
+@@ -10,6 +10,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/export.h>
+ #include <linux/module.h>
++#include <linux/workqueue.h>
+ 
+ MODULE_AUTHOR("lizhaoming	<chaoming_li@realsil.com.cn>");
+ MODULE_AUTHOR("Realtek WlanFAE	<wlanfae@realtek.com>");
+@@ -891,7 +892,7 @@ static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
+ 	if (intvec.inta & rtlpriv->cfg->maps[RTL_IMR_BCNINT]) {
+ 		rtl_dbg(rtlpriv, COMP_INTR, DBG_TRACE,
+ 			"prepare beacon for interrupt!\n");
+-		tasklet_schedule(&rtlpriv->works.irq_prepare_bcn_tasklet);
++		queue_work(system_bh_wq, &rtlpriv->works.irq_prepare_bcn_work);
+ 	}
+ 
+ 	/*<2> Tx related */
+@@ -1006,7 +1007,7 @@ static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
+ 	}
+ 
+ 	if (rtlpriv->rtlhal.earlymode_enable)
+-		tasklet_schedule(&rtlpriv->works.irq_tasklet);
++		queue_work(system_bh_wq, &rtlpriv->works.irq_work);
+ 
+ done:
+ 	rtlpriv->cfg->ops->enable_interrupt(hw);
+@@ -1014,17 +1015,17 @@ static irqreturn_t _rtl_pci_interrupt(int irq, void *dev_id)
+ 	return ret;
+ }
+ 
+-static void _rtl_pci_irq_tasklet(struct tasklet_struct *t)
++static void _rtl_pci_irq_work(struct work_struct *t)
+ {
+-	struct rtl_priv *rtlpriv = from_tasklet(rtlpriv, t, works.irq_tasklet);
++	struct rtl_priv *rtlpriv = from_work(rtlpriv, t, works.irq_work);
+ 	struct ieee80211_hw *hw = rtlpriv->hw;
+ 	_rtl_pci_tx_chk_waitq(hw);
+ }
+ 
+-static void _rtl_pci_prepare_bcn_tasklet(struct tasklet_struct *t)
++static void _rtl_pci_prepare_bcn_work(struct work_struct *t)
+ {
+-	struct rtl_priv *rtlpriv = from_tasklet(rtlpriv, t,
+-						works.irq_prepare_bcn_tasklet);
++	struct rtl_priv *rtlpriv = from_work(rtlpriv, t,
++						works.irq_prepare_bcn_work);
+ 	struct ieee80211_hw *hw = rtlpriv->hw;
+ 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
+ 	struct rtl_mac *mac = rtl_mac(rtl_priv(hw));
+@@ -1148,10 +1149,10 @@ static void _rtl_pci_init_struct(struct ieee80211_hw *hw,
+ 	/*QOS*/
+ 	rtlpci->acm_method = EACMWAY2_SW;
+ 
+-	/*task */
+-	tasklet_setup(&rtlpriv->works.irq_tasklet, _rtl_pci_irq_tasklet);
+-	tasklet_setup(&rtlpriv->works.irq_prepare_bcn_tasklet,
+-		     _rtl_pci_prepare_bcn_tasklet);
++	/*work */
++	INIT_WORK(&rtlpriv->works.irq_work, _rtl_pci_irq_work);
++	tasklet_setup(&rtlpriv->works.irq_prepare_bcn_work,
++		     _rtl_pci_prepare_bcn_work);
+ 	INIT_WORK(&rtlpriv->works.lps_change_work,
+ 		  rtl_lps_change_work_callback);
+ }
+@@ -1694,7 +1695,7 @@ static void rtl_pci_deinit(struct ieee80211_hw *hw)
+ 	_rtl_pci_deinit_trx_ring(hw);
+ 
+ 	synchronize_irq(rtlpci->pdev->irq);
+-	tasklet_kill(&rtlpriv->works.irq_tasklet);
++	cancel_work_sync(&rtlpriv->works.irq_work);
+ 	cancel_work_sync(&rtlpriv->works.lps_change_work);
+ 
+ 	destroy_workqueue(rtlpriv->works.rtl_wq);
+diff --git a/drivers/net/wireless/realtek/rtlwifi/ps.c b/drivers/net/wireless/realtek/rtlwifi/ps.c
+index 6241e4fed4f6..94f5bab9871f 100644
+--- a/drivers/net/wireless/realtek/rtlwifi/ps.c
++++ b/drivers/net/wireless/realtek/rtlwifi/ps.c
+@@ -53,7 +53,7 @@ bool rtl_ps_disable_nic(struct ieee80211_hw *hw)
+ 
+ 	/*<2> Disable Interrupt */
+ 	rtlpriv->cfg->ops->disable_interrupt(hw);
+-	tasklet_kill(&rtlpriv->works.irq_tasklet);
++	cancel_work_sync(&rtlpriv->works.irq_tasklet);
+ 
+ 	/*<3> Disable Adapter */
+ 	rtlpriv->cfg->ops->hw_disable(hw);
+diff --git a/drivers/net/wireless/realtek/rtlwifi/usb.c b/drivers/net/wireless/realtek/rtlwifi/usb.c
+index 30bf2775a335..a357539a8478 100644
+--- a/drivers/net/wireless/realtek/rtlwifi/usb.c
++++ b/drivers/net/wireless/realtek/rtlwifi/usb.c
+@@ -9,6 +9,7 @@
+ #include "rtl8192c/fw_common.h"
+ #include <linux/export.h>
+ #include <linux/module.h>
++#include <linux/workqueue.h>
+ 
+ MODULE_AUTHOR("lizhaoming	<chaoming_li@realsil.com.cn>");
+ MODULE_AUTHOR("Realtek WlanFAE	<wlanfae@realtek.com>");
+@@ -270,7 +271,7 @@ static int _rtl_usb_init_tx(struct ieee80211_hw *hw)
+ 	return 0;
+ }
+ 
+-static void _rtl_rx_work(struct tasklet_struct *t);
++static void _rtl_rx_work(struct work_struct *t);
+ 
+ static int _rtl_usb_init_rx(struct ieee80211_hw *hw)
+ {
+@@ -291,7 +292,7 @@ static int _rtl_usb_init_rx(struct ieee80211_hw *hw)
+ 	init_usb_anchor(&rtlusb->rx_cleanup_urbs);
+ 
+ 	skb_queue_head_init(&rtlusb->rx_queue);
+-	tasklet_setup(&rtlusb->rx_work_tasklet, _rtl_rx_work);
++	INIT_WORK(&rtlusb->rx_work_work, _rtl_rx_work);
+ 
+ 	return 0;
+ }
+@@ -508,9 +509,9 @@ static void _rtl_rx_pre_process(struct ieee80211_hw *hw, struct sk_buff *skb)
+ 
+ #define __RX_SKB_MAX_QUEUED	64
+ 
+-static void _rtl_rx_work(struct tasklet_struct *t)
++static void _rtl_rx_work(struct work_struct *t)
+ {
+-	struct rtl_usb *rtlusb = from_tasklet(rtlusb, t, rx_work_tasklet);
++	struct rtl_usb *rtlusb = from_work(rtlusb, t, rx_work_work);
+ 	struct ieee80211_hw *hw = usb_get_intfdata(rtlusb->intf);
+ 	struct sk_buff *skb;
+ 
+@@ -615,7 +616,7 @@ static void _rtl_rx_completed(struct urb *_urb)
+ 		skb_put_data(skb, _urb->transfer_buffer, size);
+ 
+ 		skb_queue_tail(&rtlusb->rx_queue, skb);
+-		tasklet_schedule(&rtlusb->rx_work_tasklet);
++		queue_work(system_bh_wq, &rtlusb->rx_work_work);
+ 
+ 		goto resubmit;
+ 	}
+@@ -657,7 +658,7 @@ static void _rtl_usb_cleanup_rx(struct ieee80211_hw *hw)
+ 
+ 	usb_kill_anchored_urbs(&rtlusb->rx_submitted);
+ 
+-	tasklet_kill(&rtlusb->rx_work_tasklet);
++	cancel_work_sync(&rtlusb->rx_work_work);
+ 	cancel_work_sync(&rtlpriv->works.lps_change_work);
+ 
+ 	if (rtlpriv->works.rtl_wq) {
+@@ -784,7 +785,7 @@ static void rtl_usb_stop(struct ieee80211_hw *hw)
+ 	/* free pre-allocated URBs from rtl_usb_start() */
+ 	usb_kill_anchored_urbs(&rtlusb->rx_submitted);
+ 
+-	tasklet_kill(&rtlusb->rx_work_tasklet);
++	cancel_work_sync(&rtlusb->rx_work_work);
+ 	cancel_work_sync(&rtlpriv->works.lps_change_work);
+ 	cancel_work_sync(&rtlpriv->works.update_beacon_work);
+ 
+diff --git a/drivers/net/wireless/realtek/rtlwifi/usb.h b/drivers/net/wireless/realtek/rtlwifi/usb.h
+index 3bf85b23eec1..042d7412e3f1 100644
+--- a/drivers/net/wireless/realtek/rtlwifi/usb.h
++++ b/drivers/net/wireless/realtek/rtlwifi/usb.h
+@@ -5,6 +5,7 @@
+ #define __RTL_USB_H__
+ 
+ #include <linux/skbuff.h>
++#include <linux/workqueue.h>
+ 
+ #define RTL_RX_DESC_SIZE		24
+ 
+@@ -117,7 +118,7 @@ struct rtl_usb {
+ 	u32 rx_urb_num;		/* How many Bulk INs are submitted to host. */
+ 	struct usb_anchor	rx_submitted;
+ 	struct usb_anchor	rx_cleanup_urbs;
+-	struct tasklet_struct   rx_work_tasklet;
++	struct work_struct rx_work_work;
+ 	struct sk_buff_head	rx_queue;
+ 	void (*usb_rx_segregate_hdl)(struct ieee80211_hw *, struct sk_buff *,
+ 				     struct sk_buff_head *);
+diff --git a/drivers/net/wireless/realtek/rtlwifi/wifi.h b/drivers/net/wireless/realtek/rtlwifi/wifi.h
+index d87cd2252eac..1aeb5cd98991 100644
+--- a/drivers/net/wireless/realtek/rtlwifi/wifi.h
++++ b/drivers/net/wireless/realtek/rtlwifi/wifi.h
+@@ -14,6 +14,7 @@
+ #include <net/mac80211.h>
+ #include <linux/completion.h>
+ #include <linux/bitfield.h>
++#include <linux/workqueue.h>
+ #include "debug.h"
+ 
+ #define	MASKBYTE0				0xff
+@@ -2424,9 +2425,9 @@ struct rtl_works {
+ 	struct timer_list watchdog_timer;
+ 	struct timer_list fw_clockoff_timer;
+ 	struct timer_list fast_antenna_training_timer;
+-	/*task */
+-	struct tasklet_struct irq_tasklet;
+-	struct tasklet_struct irq_prepare_bcn_tasklet;
++	/*work */
++	struct work_struct irq_work;
++	struct work_struct irq_prepare_bcn_work;
+ 
+ 	/*work queue */
+ 	struct workqueue_struct *rtl_wq;
+diff --git a/drivers/net/wireless/zydas/zd1211rw/zd_usb.c b/drivers/net/wireless/zydas/zd1211rw/zd_usb.c
+index 8505d84eeed6..88aff48dd39d 100644
+--- a/drivers/net/wireless/zydas/zd1211rw/zd_usb.c
++++ b/drivers/net/wireless/zydas/zd1211rw/zd_usb.c
+@@ -16,6 +16,7 @@
+ #include <linux/usb.h>
+ #include <linux/workqueue.h>
+ #include <linux/module.h>
++#include <linux/workqueue.h>
+ #include <net/mac80211.h>
+ #include <asm/unaligned.h>
+ 
+@@ -674,7 +675,7 @@ static void rx_urb_complete(struct urb *urb)
+ 	usb = urb->context;
+ 	rx = &usb->rx;
+ 
+-	tasklet_schedule(&rx->reset_timer_tasklet);
++	queue_work(system_bh_wq, &rx->reset_timer_work);
+ 
+ 	if (length%rx->usb_packet_size > rx->usb_packet_size-4) {
+ 		/* If there is an old first fragment, we don't care. */
+@@ -843,7 +844,7 @@ void zd_usb_disable_rx(struct zd_usb *usb)
+ 	__zd_usb_disable_rx(usb);
+ 	mutex_unlock(&rx->setup_mutex);
+ 
+-	tasklet_kill(&rx->reset_timer_tasklet);
++	cancel_work_sync(&rx->reset_timer_work);
+ 	cancel_delayed_work_sync(&rx->idle_work);
+ }
+ 
+@@ -1138,9 +1139,9 @@ static void zd_rx_idle_timer_handler(struct work_struct *work)
+ 	zd_usb_reset_rx(usb);
+ }
+ 
+-static void zd_usb_reset_rx_idle_timer_tasklet(struct tasklet_struct *t)
++static void zd_usb_reset_rx_idle_timer_work(struct work_struct *t)
+ {
+-	struct zd_usb *usb = from_tasklet(usb, t, rx.reset_timer_tasklet);
++	struct zd_usb *usb = from_work(usb, t, rx.reset_timer_work);
+ 
+ 	zd_usb_reset_rx_idle_timer(usb);
+ }
+@@ -1176,9 +1177,9 @@ static inline void init_usb_rx(struct zd_usb *usb)
+ 	}
+ 	ZD_ASSERT(rx->fragment_length == 0);
+ 	INIT_DELAYED_WORK(&rx->idle_work, zd_rx_idle_timer_handler);
+-	rx->reset_timer_tasklet.func = (void (*))
+-					zd_usb_reset_rx_idle_timer_tasklet;
+-	rx->reset_timer_tasklet.data = (unsigned long)&rx->reset_timer_tasklet;
++	rx->reset_timer_work.func = (void (*))
++					zd_usb_reset_rx_idle_timer_work;
++	rx->reset_timer_work.data = (unsigned long)&rx->reset_timer_work;
+ }
+ 
+ static inline void init_usb_tx(struct zd_usb *usb)
+diff --git a/drivers/net/wireless/zydas/zd1211rw/zd_usb.h b/drivers/net/wireless/zydas/zd1211rw/zd_usb.h
+index 8f03b09a602c..d747d59f2b65 100644
+--- a/drivers/net/wireless/zydas/zd1211rw/zd_usb.h
++++ b/drivers/net/wireless/zydas/zd1211rw/zd_usb.h
+@@ -13,6 +13,7 @@
+ #include <linux/spinlock.h>
+ #include <linux/skbuff.h>
+ #include <linux/usb.h>
++#include <linux/workqueue.h>
+ 
+ #include "zd_def.h"
+ 
+@@ -173,7 +174,7 @@ struct zd_usb_rx {
+ 	spinlock_t lock;
+ 	struct mutex setup_mutex;
+ 	struct delayed_work idle_work;
+-	struct tasklet_struct reset_timer_tasklet;
++	struct work_struct reset_timer_work;
+ 	u8 fragment[2 * USB_MAX_RX_SIZE];
+ 	unsigned int fragment_length;
+ 	unsigned int usb_packet_size;
+-- 
+2.17.1
+
