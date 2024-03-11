@@ -1,7 +1,7 @@
-From d2b9fdc124eb3e7cc67fa2e81efbf10a82969b52 Mon Sep 17 00:00:00 2001
+From c5dd389a9f708f32adb45dc5919c6f9aac885130 Mon Sep 17 00:00:00 2001
 From: Allen Pais <apais@linux.microsoft.com>
-Date: Tue, 20 Feb 2024 19:26:11 +0000
-Subject: [PATCH 3/8] USB: Convert from tasklet to BH workqueue
+Date: Mon, 11 Mar 2024 19:09:39 +0000
+Subject: [PATCH 04/10] USB: Convert from tasklet to BH workqueue
 
 The only generic interface to execute asynchronously in the BH context is
 tasklet; however, it's marked deprecated and has some design flaws. To
@@ -12,28 +12,28 @@ are executed in the BH context.
 This patch converts drivers/infiniband/* from tasklet to BH workqueue.
 
 Based on the work done by Tejun Heo <tj@kernel.org>
-Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v1
-
-Check again
+Branch: https://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git disable_work-v3
 
 Signed-off-by: Allen Pais <allen.lkml@gmail.com>
 ---
- drivers/usb/atm/usbatm.c            | 59 ++++++++++++++++-------------
- drivers/usb/atm/usbatm.h            |  2 +-
- drivers/usb/core/hcd.c              | 23 +++++------
- drivers/usb/gadget/udc/fsl_qe_udc.c | 20 +++++-----
- drivers/usb/gadget/udc/fsl_qe_udc.h |  4 +-
+ drivers/usb/atm/usbatm.c            | 55 +++++++++++++++--------------
+ drivers/usb/atm/usbatm.h            |  3 +-
+ drivers/usb/core/hcd.c              | 35 +++++++++---------
+ drivers/usb/gadget/udc/fsl_qe_udc.c | 21 +++++------
+ drivers/usb/gadget/udc/fsl_qe_udc.h |  4 +--
  drivers/usb/host/ehci-sched.c       |  2 +-
  drivers/usb/host/fhci-hcd.c         |  3 +-
- drivers/usb/host/fhci-sched.c       | 10 +++--
- drivers/usb/host/fhci.h             |  4 +-
- drivers/usb/host/xhci-dbgcap.h      |  2 +-
- drivers/usb/host/xhci-dbgtty.c      | 16 ++++----
+ drivers/usb/host/fhci-sched.c       | 10 +++---
+ drivers/usb/host/fhci.h             |  5 +--
+ drivers/usb/host/xhci-dbgcap.h      |  3 +-
+ drivers/usb/host/xhci-dbgtty.c      | 15 ++++----
+ include/linux/usb/cdc_ncm.h         |  2 +-
  include/linux/usb/hcd.h             |  2 +-
- 12 files changed, 79 insertions(+), 68 deletions(-)
+ include/linux/usb/usbnet.h          |  2 +-
+ 14 files changed, 84 insertions(+), 78 deletions(-)
 
 diff --git a/drivers/usb/atm/usbatm.c b/drivers/usb/atm/usbatm.c
-index 2da6615fbb6f..c70650b59ed6 100644
+index 2da6615fbb6f..74849f24e52e 100644
 --- a/drivers/usb/atm/usbatm.c
 +++ b/drivers/usb/atm/usbatm.c
 @@ -17,7 +17,7 @@
@@ -41,11 +41,28 @@ index 2da6615fbb6f..c70650b59ed6 100644
   *  		- Module now autoloads on device plugin
   *  		- Merged relevant parts of sarlib
 - *  		- Replaced the kernel thread with a tasklet
-+ *  		- Replaced the kernel thread with a wq
++ *  		- Replaced the kernel thread with a work
   *  		- New packet transmission code
   *  		- Changed proc file contents
   *  		- Fixed all known SMP races
-@@ -269,7 +269,7 @@ static void usbatm_complete(struct urb *urb)
+@@ -68,6 +68,7 @@
+ #include <linux/wait.h>
+ #include <linux/kthread.h>
+ #include <linux/ratelimit.h>
++#include <linux/workqueue.h>
+ 
+ #ifdef VERBOSE_DEBUG
+ static int usbatm_print_packet(struct usbatm_data *instance, const unsigned char *data, int len);
+@@ -249,7 +250,7 @@ static void usbatm_complete(struct urb *urb)
+ 	/* vdbg("%s: urb 0x%p, status %d, actual_length %d",
+ 	     __func__, urb, status, urb->actual_length); */
+ 
+-	/* Can be invoked from task context, protect against interrupts */
++	/* Can be invoked from work context, protect against interrupts */
+ 	spin_lock_irqsave(&channel->lock, flags);
+ 
+ 	/* must add to the back when receiving; doesn't matter when sending */
+@@ -269,7 +270,7 @@ static void usbatm_complete(struct urb *urb)
  		/* throttle processing in case of an error */
  		mod_timer(&channel->delay, jiffies + msecs_to_jiffies(THROTTLE_MSECS));
  	} else
@@ -54,37 +71,35 @@ index 2da6615fbb6f..c70650b59ed6 100644
  }
  
  
-@@ -511,10 +511,11 @@ static unsigned int usbatm_write_cells(struct usbatm_data *instance,
+@@ -511,10 +512,10 @@ static unsigned int usbatm_write_cells(struct usbatm_data *instance,
  **  receive  **
  **************/
  
 -static void usbatm_rx_process(struct tasklet_struct *t)
-+static void usbatm_rx_process(struct work_struct *work)
++static void usbatm_rx_process(struct work_struct *t)
  {
 -	struct usbatm_data *instance = from_tasklet(instance, t,
 -						    rx_channel.tasklet);
-+	struct usbatm_data *instance = container_of(work,
-+						    struct usbatm_data,
++	struct usbatm_data *instance = from_work(instance, t,
 +						    rx_channel.work);
  	struct urb *urb;
  
  	while ((urb = usbatm_pop_urb(&instance->rx_channel))) {
-@@ -565,10 +566,11 @@ static void usbatm_rx_process(struct tasklet_struct *t)
+@@ -565,10 +566,10 @@ static void usbatm_rx_process(struct tasklet_struct *t)
  **  send  **
  ***********/
  
 -static void usbatm_tx_process(struct tasklet_struct *t)
-+static void usbatm_tx_process(struct work_struct *work)
++static void usbatm_tx_process(struct work_struct *t)
  {
 -	struct usbatm_data *instance = from_tasklet(instance, t,
 -						    tx_channel.tasklet);
-+	struct usbatm_data *instance = container_of(work,
-+						    struct usbatm_data,
++	struct usbatm_data *instance = from_work(instance, t,
 +						    tx_channel.work);
  	struct sk_buff *skb = instance->current_skb;
  	struct urb *urb = NULL;
  	const unsigned int buf_size = instance->tx_channel.buf_size;
-@@ -632,13 +634,14 @@ static void usbatm_cancel_send(struct usbatm_data *instance,
+@@ -632,13 +633,13 @@ static void usbatm_cancel_send(struct usbatm_data *instance,
  	}
  	spin_unlock_irq(&instance->sndqueue.lock);
  
@@ -96,12 +111,11 @@ index 2da6615fbb6f..c70650b59ed6 100644
  		usbatm_pop(vcc, skb);
  	}
 -	tasklet_enable(&instance->tx_channel.tasklet);
-+	enable_work(&instance->tx_channel.work);
-+	queue_work(system_bh_wq, &instance->tx_channel.work);
++	enable_and_queue_work(system_bh_wq, &instance->tx_channel.work);
  }
  
  static int usbatm_atm_send(struct atm_vcc *vcc, struct sk_buff *skb)
-@@ -677,7 +680,7 @@ static int usbatm_atm_send(struct atm_vcc *vcc, struct sk_buff *skb)
+@@ -677,7 +678,7 @@ static int usbatm_atm_send(struct atm_vcc *vcc, struct sk_buff *skb)
  	ctrl->crc = crc32_be(~0, skb->data, skb->len);
  
  	skb_queue_tail(&instance->sndqueue, skb);
@@ -110,7 +124,7 @@ index 2da6615fbb6f..c70650b59ed6 100644
  
  	return 0;
  
-@@ -695,8 +698,8 @@ static void usbatm_destroy_instance(struct kref *kref)
+@@ -695,8 +696,8 @@ static void usbatm_destroy_instance(struct kref *kref)
  {
  	struct usbatm_data *instance = container_of(kref, struct usbatm_data, refcount);
  
@@ -121,7 +135,7 @@ index 2da6615fbb6f..c70650b59ed6 100644
  	usb_put_dev(instance->usb_dev);
  	kfree(instance);
  }
-@@ -823,12 +826,13 @@ static int usbatm_atm_open(struct atm_vcc *vcc)
+@@ -823,12 +824,12 @@ static int usbatm_atm_open(struct atm_vcc *vcc)
  
  	vcc->dev_data = new;
  
@@ -132,12 +146,11 @@ index 2da6615fbb6f..c70650b59ed6 100644
  	instance->cached_vci = vci;
  	list_add(&new->list, &instance->vcc_list);
 -	tasklet_enable(&instance->rx_channel.tasklet);
-+	enable_work(&instance->rx_channel.work);
-+	queue_work(system_bh_wq, &instance->rx_channel.work);
++	enable_and_queue_work(system_bh_wq, &instance->rx_channel.work);
  
  	set_bit(ATM_VF_ADDR, &vcc->flags);
  	set_bit(ATM_VF_PARTIAL, &vcc->flags);
-@@ -858,14 +862,15 @@ static void usbatm_atm_close(struct atm_vcc *vcc)
+@@ -858,14 +859,14 @@ static void usbatm_atm_close(struct atm_vcc *vcc)
  
  	mutex_lock(&instance->serialize);	/* vs self, usbatm_atm_open, usbatm_usb_disconnect */
  
@@ -150,17 +163,16 @@ index 2da6615fbb6f..c70650b59ed6 100644
  	}
  	list_del(&vcc_data->list);
 -	tasklet_enable(&instance->rx_channel.tasklet);
-+	enable_work(&instance->rx_channel.work);
-+	queue_work(system_bh_wq, &instance->rx_channel.work);
++	enable_and_queue_work(system_bh_wq, &instance->rx_channel.work);
  
  	kfree_skb(vcc_data->sarb);
  	vcc_data->sarb = NULL;
-@@ -991,18 +996,18 @@ static int usbatm_heavy_init(struct usbatm_data *instance)
+@@ -991,18 +992,18 @@ static int usbatm_heavy_init(struct usbatm_data *instance)
  	return 0;
  }
  
 -static void usbatm_tasklet_schedule(struct timer_list *t)
-+static void usbatm_wq_schedule(struct timer_list *t)
++static void usbatm_queue_work(system_bh_wq, struct timer_list *t)
  {
  	struct usbatm_channel *channel = from_timer(channel, t, delay);
  
@@ -173,11 +185,11 @@ index 2da6615fbb6f..c70650b59ed6 100644
  	spin_lock_init(&channel->lock);
  	INIT_LIST_HEAD(&channel->list);
 -	timer_setup(&channel->delay, usbatm_tasklet_schedule, 0);
-+	timer_setup(&channel->delay, usbatm_wq_schedule, 0);
++	timer_setup(&channel->delay, usbatm_queue_work, 0);
  }
  
  int usbatm_usb_probe(struct usb_interface *intf, const struct usb_device_id *id,
-@@ -1074,8 +1079,8 @@ int usbatm_usb_probe(struct usb_interface *intf, const struct usb_device_id *id,
+@@ -1074,8 +1075,8 @@ int usbatm_usb_probe(struct usb_interface *intf, const struct usb_device_id *id,
  
  	usbatm_init_channel(&instance->rx_channel);
  	usbatm_init_channel(&instance->tx_channel);
@@ -188,7 +200,7 @@ index 2da6615fbb6f..c70650b59ed6 100644
  	instance->rx_channel.stride = ATM_CELL_SIZE + driver->rx_padding;
  	instance->tx_channel.stride = ATM_CELL_SIZE + driver->tx_padding;
  	instance->rx_channel.usbatm = instance->tx_channel.usbatm = instance;
-@@ -1231,8 +1236,8 @@ void usbatm_usb_disconnect(struct usb_interface *intf)
+@@ -1231,8 +1232,8 @@ void usbatm_usb_disconnect(struct usb_interface *intf)
  		vcc_release_async(vcc_data->vcc, -EPIPE);
  	mutex_unlock(&instance->serialize);
  
@@ -199,24 +211,30 @@ index 2da6615fbb6f..c70650b59ed6 100644
  
  	for (i = 0; i < num_rcv_urbs + num_snd_urbs; i++)
  		usb_kill_urb(instance->urbs[i]);
-@@ -1245,8 +1250,10 @@ void usbatm_usb_disconnect(struct usb_interface *intf)
+@@ -1245,8 +1246,8 @@ void usbatm_usb_disconnect(struct usb_interface *intf)
  	INIT_LIST_HEAD(&instance->rx_channel.list);
  	INIT_LIST_HEAD(&instance->tx_channel.list);
  
 -	tasklet_enable(&instance->rx_channel.tasklet);
 -	tasklet_enable(&instance->tx_channel.tasklet);
-+	enable_work(&instance->rx_channel.work);
-+	queue_work(system_bh_wq, &instance->rx_channel.work);
-+	enable_work(&instance->tx_channel.work);
-+	queue_work(system_bh_wq, &instance->tx_channel.work);
++	enable_and_queue_work(system_bh_wq, &instance->rx_channel.work);
++	enable_and_queue_work(system_bh_wq, &instance->tx_channel.work);
  
  	if (instance->atm_dev && instance->driver->atm_stop)
  		instance->driver->atm_stop(instance, instance->atm_dev);
 diff --git a/drivers/usb/atm/usbatm.h b/drivers/usb/atm/usbatm.h
-index d96658e2e209..cf4e17822679 100644
+index d96658e2e209..3452f8c2e1e5 100644
 --- a/drivers/usb/atm/usbatm.h
 +++ b/drivers/usb/atm/usbatm.h
-@@ -109,7 +109,7 @@ struct usbatm_channel {
+@@ -21,6 +21,7 @@
+ #include <linux/usb.h>
+ #include <linux/mutex.h>
+ #include <linux/ratelimit.h>
++#include <linux/workqueue.h>
+ 
+ /*
+ #define VERBOSE_DEBUG
+@@ -109,7 +110,7 @@ struct usbatm_channel {
  	unsigned int packet_size;	/* endpoint maxpacket */
  	spinlock_t lock;
  	struct list_head list;
@@ -226,19 +244,53 @@ index d96658e2e209..cf4e17822679 100644
  	struct usbatm_data *usbatm;
  };
 diff --git a/drivers/usb/core/hcd.c b/drivers/usb/core/hcd.c
-index 12b6dfeaf658..7aae6c0def1e 100644
+index 12b6dfeaf658..07eb9aa384bd 100644
 --- a/drivers/usb/core/hcd.c
 +++ b/drivers/usb/core/hcd.c
-@@ -1664,9 +1664,10 @@ static void __usb_hcd_giveback_urb(struct urb *urb)
+@@ -37,6 +37,7 @@
+ #include <linux/usb.h>
+ #include <linux/usb/hcd.h>
+ #include <linux/usb/otg.h>
++#include <linux/workqueue.h>
+ 
+ #include "usb.h"
+ #include "phy.h"
+@@ -886,7 +887,7 @@ static void usb_bus_init (struct usb_bus *bus)
+  * usb_register_bus - registers the USB host controller with the usb core
+  * @bus: pointer to the bus to register
+  *
+- * Context: task context, might sleep.
++ * Context: work context, might sleep.
+  *
+  * Assigns a bus number, and links the controller into usbcore data
+  * structures so that it can be seen by scanning the bus list.
+@@ -922,7 +923,7 @@ static int usb_register_bus(struct usb_bus *bus)
+  * usb_deregister_bus - deregisters the USB host controller
+  * @bus: pointer to the bus to deregister
+  *
+- * Context: task context, might sleep.
++ * Context: work context, might sleep.
+  *
+  * Recycles the bus number, and unlinks the controller from usbcore data
+  * structures so that it won't be seen by scanning the bus list.
+@@ -1642,7 +1643,7 @@ static void __usb_hcd_giveback_urb(struct urb *urb)
+ 	/* pass ownership to the completion handler */
+ 	urb->status = status;
+ 	/*
+-	 * This function can be called in task context inside another remote
++	 * This function can be called in work context inside another remote
+ 	 * coverage collection section, but kcov doesn't support that kind of
+ 	 * recursion yet. Only collect coverage in softirq context for now.
+ 	 */
+@@ -1664,9 +1665,9 @@ static void __usb_hcd_giveback_urb(struct urb *urb)
  	usb_put_urb(urb);
  }
  
 -static void usb_giveback_urb_bh(struct tasklet_struct *t)
-+static void usb_giveback_urb_bh(struct work_struct *work)
++static void usb_giveback_urb_bh(struct work_struct *t)
  {
 -	struct giveback_urb_bh *bh = from_tasklet(bh, t, bh);
-+	struct giveback_urb_bh *bh = container_of(work,
-+					struct giveback_urb_bh, work);
++	struct giveback_urb_bh *bh = from_work(bh, t, bh);
  	struct list_head local_list;
  
  	spin_lock_irq(&bh->lock);
@@ -247,10 +299,10 @@ index 12b6dfeaf658..7aae6c0def1e 100644
  	if (!list_empty(&bh->head)) {
  		if (bh->high_prio)
 -			tasklet_hi_schedule(&bh->bh);
-+			queue_work(system_bh_highpri_wq, &bh->work);
++			queue_work(system_bh_highpri_wq, &bh->bh);
  		else
 -			tasklet_schedule(&bh->bh);
-+			queue_work(system_bh_wq, &bh->work);
++			queue_work(system_bh_wq, &bh->bh);
  	}
  	bh->running = false;
  	spin_unlock_irq(&bh->lock);
@@ -259,7 +311,7 @@ index 12b6dfeaf658..7aae6c0def1e 100644
   *
   * Context: atomic. The completion callback is invoked in caller's context.
 - * For HCDs with HCD_BH flag set, the completion callback is invoked in tasklet
-+ * For HCDs with HCD_BH flag set, the completion callback is invoked in worqueue
++ * For HCDs with HCD_BH flag set, the completion callback is invoked in work
   * context (except for URBs submitted to the root hub which always complete in
   * caller's context).
   *
@@ -268,7 +320,7 @@ index 12b6dfeaf658..7aae6c0def1e 100644
  	bool running;
  
 -	/* pass status to tasklet via unlinked */
-+	/* pass status to workqueue via unlinked */
++	/* pass status to work via unlinked */
  	if (likely(!urb->unlinked))
  		urb->unlinked = status;
  
@@ -277,10 +329,10 @@ index 12b6dfeaf658..7aae6c0def1e 100644
  		;
  	else if (bh->high_prio)
 -		tasklet_hi_schedule(&bh->bh);
-+		queue_work(system_bh_highpri_wq, &bh->work);
++		queue_work(system_bh_highpri_wq, &bh->bh);
  	else
 -		tasklet_schedule(&bh->bh);
-+		queue_work(system_bh_wq, &bh->work);
++		queue_work(system_bh_wq, &bh->bh);
  }
  EXPORT_SYMBOL_GPL(usb_hcd_giveback_urb);
  
@@ -289,19 +341,46 @@ index 12b6dfeaf658..7aae6c0def1e 100644
  	spin_lock_init(&bh->lock);
  	INIT_LIST_HEAD(&bh->head);
 -	tasklet_setup(&bh->bh, usb_giveback_urb_bh);
-+	INIT_WORK(&bh->work, usb_giveback_urb_bh);
++	INIT_WORK(&bh->bh, usb_giveback_urb_bh);
  }
  
  struct usb_hcd *__usb_create_hcd(const struct hc_driver *driver,
+@@ -2612,7 +2613,7 @@ EXPORT_SYMBOL_GPL(__usb_create_hcd);
+  * @primary_hcd: a pointer to the usb_hcd structure that is sharing the
+  *              PCI device.  Only allocate certain resources for the primary HCD
+  *
+- * Context: task context, might sleep.
++ * Context: work context, might sleep.
+  *
+  * Allocate a struct usb_hcd, with extra space at the end for the
+  * HC driver's private data.  Initialize the generic members of the
+@@ -2635,7 +2636,7 @@ EXPORT_SYMBOL_GPL(usb_create_shared_hcd);
+  * @dev: device for this HC, stored in hcd->self.controller
+  * @bus_name: value to store in hcd->self.bus_name
+  *
+- * Context: task context, might sleep.
++ * Context: work context, might sleep.
+  *
+  * Allocate a struct usb_hcd, with extra space at the end for the
+  * HC driver's private data.  Initialize the generic members of the
 @@ -2926,7 +2927,7 @@ int usb_add_hcd(struct usb_hcd *hcd,
  			&& device_can_wakeup(&hcd->self.root_hub->dev))
  		dev_dbg(hcd->self.controller, "supports USB remote wakeup\n");
  
 -	/* initialize tasklets */
-+	/* initialize wq */
++	/* initialize works */
  	init_giveback_urb_bh(&hcd->high_prio_bh);
  	hcd->high_prio_bh.high_prio = true;
  	init_giveback_urb_bh(&hcd->low_prio_bh);
+@@ -2996,7 +2997,7 @@ EXPORT_SYMBOL_GPL(usb_add_hcd);
+  * usb_remove_hcd - shutdown processing for generic HCDs
+  * @hcd: the usb_hcd structure to remove
+  *
+- * Context: task context, might sleep.
++ * Context: work context, might sleep.
+  *
+  * Disconnects the root hub, then reverses the effects of usb_add_hcd(),
+  * invoking the HCD's stop() method.
 @@ -3036,7 +3037,7 @@ void usb_remove_hcd(struct usb_hcd *hcd)
  	mutex_unlock(&usb_bus_idr_lock);
  
@@ -312,22 +391,30 @@ index 12b6dfeaf658..7aae6c0def1e 100644
  	 *   make sure its URBs are completed during the disconnect()
  	 *   callback
 diff --git a/drivers/usb/gadget/udc/fsl_qe_udc.c b/drivers/usb/gadget/udc/fsl_qe_udc.c
-index 4e88681a79b6..3a87cec01aa1 100644
+index 4e88681a79b6..ae29d946a972 100644
 --- a/drivers/usb/gadget/udc/fsl_qe_udc.c
 +++ b/drivers/usb/gadget/udc/fsl_qe_udc.c
-@@ -930,9 +930,9 @@ static int qe_ep_rxframe_handle(struct qe_ep *ep)
+@@ -35,6 +35,7 @@
+ #include <linux/usb/ch9.h>
+ #include <linux/usb/gadget.h>
+ #include <linux/usb/otg.h>
++#include <linux/workqueue.h>
+ #include <soc/fsl/qe/qe.h>
+ #include <asm/cpm.h>
+ #include <asm/dma.h>
+@@ -930,9 +931,9 @@ static int qe_ep_rxframe_handle(struct qe_ep *ep)
  	return 0;
  }
  
 -static void ep_rx_tasklet(struct tasklet_struct *t)
-+static void ep_rx_work(struct work_struct *work)
++static void ep_rx_work(struct work_struct *t)
  {
 -	struct qe_udc *udc = from_tasklet(udc, t, rx_tasklet);
-+	struct qe_udc *udc = container_of(work, struct qe_udc, rx_work);
++	struct qe_udc *udc = from_work(udc, t, rx_work);
  	struct qe_ep *ep;
  	struct qe_frame *pframe;
  	struct qe_bd __iomem *bd;
-@@ -945,9 +945,9 @@ static void ep_rx_tasklet(struct tasklet_struct *t)
+@@ -945,9 +946,9 @@ static void ep_rx_tasklet(struct tasklet_struct *t)
  	for (i = 1; i < USB_MAX_ENDPOINTS; i++) {
  		ep = &udc->eps[i];
  
@@ -339,7 +426,7 @@ index 4e88681a79b6..3a87cec01aa1 100644
  			continue;
  		}
  
-@@ -1012,7 +1012,7 @@ static void ep_rx_tasklet(struct tasklet_struct *t)
+@@ -1012,7 +1013,7 @@ static void ep_rx_tasklet(struct tasklet_struct *t)
  		if (ep->localnack)
  			ep_recycle_rxbds(ep);
  
@@ -348,7 +435,7 @@ index 4e88681a79b6..3a87cec01aa1 100644
  	} /* for i=1 */
  
  	spin_unlock_irqrestore(&udc->lock, flags);
-@@ -1057,8 +1057,8 @@ static int qe_ep_rx(struct qe_ep *ep)
+@@ -1057,8 +1058,8 @@ static int qe_ep_rx(struct qe_ep *ep)
  		return 0;
  	}
  
@@ -359,7 +446,7 @@ index 4e88681a79b6..3a87cec01aa1 100644
  
  	return 0;
  }
-@@ -2559,7 +2559,7 @@ static int qe_udc_probe(struct platform_device *ofdev)
+@@ -2559,7 +2560,7 @@ static int qe_udc_probe(struct platform_device *ofdev)
  					DMA_TO_DEVICE);
  	}
  
@@ -368,7 +455,7 @@ index 4e88681a79b6..3a87cec01aa1 100644
  	/* request irq and disable DR  */
  	udc->usb_irq = irq_of_parse_and_map(np, 0);
  	if (!udc->usb_irq) {
-@@ -2636,7 +2636,7 @@ static void qe_udc_remove(struct platform_device *ofdev)
+@@ -2636,7 +2637,7 @@ static void qe_udc_remove(struct platform_device *ofdev)
  	usb_del_gadget_udc(&udc->gadget);
  
  	udc->done = &done;
@@ -377,7 +464,7 @@ index 4e88681a79b6..3a87cec01aa1 100644
  
  	if (udc->nullmap) {
  		dma_unmap_single(udc->gadget.dev.parent,
-@@ -2671,7 +2671,7 @@ static void qe_udc_remove(struct platform_device *ofdev)
+@@ -2671,7 +2672,7 @@ static void qe_udc_remove(struct platform_device *ofdev)
  	free_irq(udc->usb_irq, udc);
  	irq_dispose_mapping(udc->usb_irq);
  
@@ -409,7 +496,7 @@ index 53ca0ff7c2cb..1de87c318460 100644
  	struct completion *done;	/* to make sure release() is done */
  };
 diff --git a/drivers/usb/host/ehci-sched.c b/drivers/usb/host/ehci-sched.c
-index 7e834587e7de..2602b8a88d0e 100644
+index 7e834587e7de..98823cf9dd0a 100644
 --- a/drivers/usb/host/ehci-sched.c
 +++ b/drivers/usb/host/ehci-sched.c
 @@ -682,7 +682,7 @@ static void start_unlink_intr(struct ehci_hcd *ehci, struct ehci_qh *qh)
@@ -417,12 +504,12 @@ index 7e834587e7de..2602b8a88d0e 100644
  /*
   * It is common only one intr URB is scheduled on one qh, and
 - * given complete() is run in tasklet context, introduce a bit
-+ * given complete() is run in wq context, introduce a bit
++ * given complete() is run in work context, introduce a bit
   * delay to avoid unlink qh too early.
   */
  static void start_unlink_intr_wait(struct ehci_hcd *ehci,
 diff --git a/drivers/usb/host/fhci-hcd.c b/drivers/usb/host/fhci-hcd.c
-index 9a1b5224f239..c1c86dbe3861 100644
+index 9a1b5224f239..5358bb688acb 100644
 --- a/drivers/usb/host/fhci-hcd.c
 +++ b/drivers/usb/host/fhci-hcd.c
 @@ -211,8 +211,7 @@ static int fhci_mem_init(struct fhci_hcd *fhci)
@@ -431,33 +518,31 @@ index 9a1b5224f239..c1c86dbe3861 100644
  	/* initialize work queue to handle done list */
 -	fhci_tasklet.data = (unsigned long)fhci;
 -	fhci->process_done_task = &fhci_tasklet;
-+	INIT_WORK(&fhci->process_done_work, process_done_list);
++	INIT_WORK(&fhci->process_done_task, process_done_list);
  
  	for (i = 0; i < MAX_TDS; i++) {
  		struct td *td;
 diff --git a/drivers/usb/host/fhci-sched.c b/drivers/usb/host/fhci-sched.c
-index a45ede80edfc..a0911d068a2f 100644
+index a45ede80edfc..9033cce28014 100644
 --- a/drivers/usb/host/fhci-sched.c
 +++ b/drivers/usb/host/fhci-sched.c
-@@ -628,13 +628,15 @@ irqreturn_t fhci_irq(struct usb_hcd *hcd)
+@@ -628,13 +628,13 @@ irqreturn_t fhci_irq(struct usb_hcd *hcd)
   * is process_del_list(),which unlinks URBs by scanning EDs,instead of scanning
   * the (re-reversed) done list as this does.
   */
 -static void process_done_list(unsigned long data)
-+static void process_done_list(struct work_struct *work)
++static void process_done_list(struct work_struct *t)
  {
  	struct urb *urb;
  	struct ed *ed;
  	struct td *td;
  	struct urb_priv *urb_priv;
 -	struct fhci_hcd *fhci = (struct fhci_hcd *)data;
-+	struct fhci_hcd *fhci = container_of(work,
-+					     struct fhci_hcd,
-+					     process_done_work);
++	struct fhci_hcd *fhci = from_work(fhci, t, process_done_task);
  
  	disable_irq(fhci->timer->irq);
  	disable_irq(fhci_to_hcd(fhci)->irq);
-@@ -677,13 +679,13 @@ static void process_done_list(unsigned long data)
+@@ -677,13 +677,13 @@ static void process_done_list(unsigned long data)
  	enable_irq(fhci_to_hcd(fhci)->irq);
  }
  
@@ -467,26 +552,35 @@ index a45ede80edfc..a0911d068a2f 100644
  /* transfer complted callback */
  u32 fhci_transfer_confirm_callback(struct fhci_hcd *fhci)
  {
- 	if (!fhci->process_done_task->state)
+-	if (!fhci->process_done_task->state)
 -		tasklet_schedule(fhci->process_done_task);
-+		queue_work(system_bh_wq, fhci->process_done_work);
++	if (!fhci->process_done_task)
++		queue_work(system_bh_wq, fhci->process_done_task);
  	return 0;
  }
  
 diff --git a/drivers/usb/host/fhci.h b/drivers/usb/host/fhci.h
-index 1f57b0989485..4e6f48b9b8fb 100644
+index 1f57b0989485..7cd613762249 100644
 --- a/drivers/usb/host/fhci.h
 +++ b/drivers/usb/host/fhci.h
-@@ -254,7 +254,7 @@ struct fhci_hcd {
+@@ -24,6 +24,7 @@
+ #include <linux/usb.h>
+ #include <linux/usb/hcd.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/workqueue.h>
+ #include <soc/fsl/qe/qe.h>
+ #include <soc/fsl/qe/immap_qe.h>
+ 
+@@ -254,7 +255,7 @@ struct fhci_hcd {
  	struct virtual_root_hub *vroot_hub; /* the virtual root hub */
  	int active_urbs;
  	struct fhci_controller_list *hc_list;
 -	struct tasklet_struct *process_done_task; /* tasklet for done list */
-+	struct work_struct *process_done_work; /* wq for done list */
++	struct work_struct *process_done_task; /* work for done list */
  
  	struct list_head empty_eds;
  	struct list_head empty_tds;
-@@ -549,7 +549,7 @@ void fhci_init_ep_registers(struct fhci_usb *usb,
+@@ -549,7 +550,7 @@ void fhci_init_ep_registers(struct fhci_usb *usb,
  void fhci_ep0_free(struct fhci_usb *usb);
  
  /* fhci-sched.c */
@@ -496,46 +590,62 @@ index 1f57b0989485..4e6f48b9b8fb 100644
  void fhci_flush_all_transmissions(struct fhci_usb *usb);
  void fhci_schedule_transactions(struct fhci_usb *usb);
 diff --git a/drivers/usb/host/xhci-dbgcap.h b/drivers/usb/host/xhci-dbgcap.h
-index 51a7ab3ba0ca..1a5898dfaeec 100644
+index 51a7ab3ba0ca..8dd1e9476b9a 100644
 --- a/drivers/usb/host/xhci-dbgcap.h
 +++ b/drivers/usb/host/xhci-dbgcap.h
-@@ -105,7 +105,7 @@ struct dbc_port {
+@@ -11,6 +11,7 @@
+ 
+ #include <linux/tty.h>
+ #include <linux/kfifo.h>
++#include <linux/workqueue.h>
+ 
+ struct dbc_regs {
+ 	__le32	capability;
+@@ -105,7 +106,7 @@ struct dbc_port {
  	struct list_head		read_pool;
  	struct list_head		read_queue;
  	unsigned int			n_read;
 -	struct tasklet_struct		push;
-+	struct work_struct		push_work;
++	struct work_struct 		push;
  
  	struct list_head		write_pool;
  	struct kfifo			write_fifo;
 diff --git a/drivers/usb/host/xhci-dbgtty.c b/drivers/usb/host/xhci-dbgtty.c
-index b74e98e94393..f8c42e667584 100644
+index b74e98e94393..dec2280b4ae9 100644
 --- a/drivers/usb/host/xhci-dbgtty.c
 +++ b/drivers/usb/host/xhci-dbgtty.c
-@@ -108,7 +108,7 @@ dbc_read_complete(struct xhci_dbc *dbc, struct dbc_request *req)
+@@ -11,6 +11,7 @@
+ #include <linux/tty.h>
+ #include <linux/tty_flip.h>
+ #include <linux/idr.h>
++#include <linux/workqueue.h>
+ 
+ #include "xhci.h"
+ #include "xhci-dbgcap.h"
+@@ -108,7 +109,7 @@ dbc_read_complete(struct xhci_dbc *dbc, struct dbc_request *req)
  
  	spin_lock_irqsave(&port->port_lock, flags);
  	list_add_tail(&req->list_pool, &port->read_queue);
 -	tasklet_schedule(&port->push);
-+	queue_work(system_bh_wq, &port->push_work);
++	queue_work(system_bh_wq, &port->push);
  	spin_unlock_irqrestore(&port->port_lock, flags);
  }
  
-@@ -278,7 +278,7 @@ static void dbc_tty_unthrottle(struct tty_struct *tty)
+@@ -278,7 +279,7 @@ static void dbc_tty_unthrottle(struct tty_struct *tty)
  	unsigned long		flags;
  
  	spin_lock_irqsave(&port->port_lock, flags);
 -	tasklet_schedule(&port->push);
-+	queue_work(system_bh_wq, &port->push_work);
++	queue_work(system_bh_wq, &port->push);
  	spin_unlock_irqrestore(&port->port_lock, flags);
  }
  
-@@ -294,14 +294,16 @@ static const struct tty_operations dbc_tty_ops = {
+@@ -294,14 +295,14 @@ static const struct tty_operations dbc_tty_ops = {
  	.unthrottle		= dbc_tty_unthrottle,
  };
  
 -static void dbc_rx_push(struct tasklet_struct *t)
-+static void dbc_rx_push(struct work_struct *work)
++static void dbc_rx_push(struct work_struct *t)
  {
  	struct dbc_request	*req;
  	struct tty_struct	*tty;
@@ -543,41 +653,52 @@ index b74e98e94393..f8c42e667584 100644
  	bool			do_push = false;
  	bool			disconnect = false;
 -	struct dbc_port		*port = from_tasklet(port, t, push);
-+	struct dbc_port		*port = container_of(work,
-+		       				     struct dbc_port,
-+						     push_work);
++	struct dbc_port		*port = from_work(port, t, push);
  	struct list_head	*queue = &port->read_queue;
  
  	spin_lock_irqsave(&port->port_lock, flags);
-@@ -355,7 +357,7 @@ static void dbc_rx_push(struct tasklet_struct *t)
+@@ -355,7 +356,7 @@ static void dbc_rx_push(struct tasklet_struct *t)
  	if (!list_empty(queue) && tty) {
  		if (!tty_throttled(tty)) {
  			if (do_push)
 -				tasklet_schedule(&port->push);
-+				queue_work(system_bh_wq, &port->push_work);
++				queue_work(system_bh_wq, &port->push);
  			else
  				pr_warn("ttyDBC0: RX not scheduled?\n");
  		}
-@@ -388,7 +390,7 @@ xhci_dbc_tty_init_port(struct xhci_dbc *dbc, struct dbc_port *port)
+@@ -388,7 +389,7 @@ xhci_dbc_tty_init_port(struct xhci_dbc *dbc, struct dbc_port *port)
  {
  	tty_port_init(&port->port);
  	spin_lock_init(&port->port_lock);
 -	tasklet_setup(&port->push, dbc_rx_push);
-+	INIT_WORK(&port->push_work, dbc_rx_push);
++	INIT_WORK(&port->push, dbc_rx_push);
  	INIT_LIST_HEAD(&port->read_pool);
  	INIT_LIST_HEAD(&port->read_queue);
  	INIT_LIST_HEAD(&port->write_pool);
-@@ -400,7 +402,7 @@ xhci_dbc_tty_init_port(struct xhci_dbc *dbc, struct dbc_port *port)
+@@ -400,7 +401,7 @@ xhci_dbc_tty_init_port(struct xhci_dbc *dbc, struct dbc_port *port)
  static void
  xhci_dbc_tty_exit_port(struct dbc_port *port)
  {
 -	tasklet_kill(&port->push);
-+	cancel_work_sync(&port->push_work);
++	cancel_work_sync(&port->push);
  	tty_port_destroy(&port->port);
  }
  
+diff --git a/include/linux/usb/cdc_ncm.h b/include/linux/usb/cdc_ncm.h
+index 2d207cb4837d..8775580852f9 100644
+--- a/include/linux/usb/cdc_ncm.h
++++ b/include/linux/usb/cdc_ncm.h
+@@ -96,7 +96,7 @@
+ struct cdc_ncm_ctx {
+ 	struct usb_cdc_ncm_ntb_parameters ncm_parm;
+ 	struct hrtimer tx_timer;
+-	struct tasklet_struct bh;
++	struct work_struct bh;
+ 
+ 	struct usbnet *dev;
+ 
 diff --git a/include/linux/usb/hcd.h b/include/linux/usb/hcd.h
-index 00724b4f6e12..a8158d5413a7 100644
+index 00724b4f6e12..f698aac71de3 100644
 --- a/include/linux/usb/hcd.h
 +++ b/include/linux/usb/hcd.h
 @@ -55,7 +55,7 @@ struct giveback_urb_bh {
@@ -585,10 +706,23 @@ index 00724b4f6e12..a8158d5413a7 100644
  	spinlock_t lock;
  	struct list_head  head;
 -	struct tasklet_struct bh;
-+	struct work_struct work;
++	struct work_struct bh;
  	struct usb_host_endpoint *completing_ep;
  };
  
+diff --git a/include/linux/usb/usbnet.h b/include/linux/usb/usbnet.h
+index 9f08a584d707..522c533a966b 100644
+--- a/include/linux/usb/usbnet.h
++++ b/include/linux/usb/usbnet.h
+@@ -58,7 +58,7 @@ struct usbnet {
+ 	unsigned		interrupt_count;
+ 	struct mutex		interrupt_mutex;
+ 	struct usb_anchor	deferred;
+-	struct tasklet_struct	bh;
++	struct work_struct	bh;
+ 
+ 	struct work_struct	kevent;
+ 	unsigned long		flags;
 -- 
 2.17.1
 

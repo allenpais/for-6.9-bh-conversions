@@ -1,0 +1,64 @@
+From 3a73925b3e85dc15b9eb6dc274d37d65edf72285 Mon Sep 17 00:00:00 2001
+From: Allen Pais <apais@linux.microsoft.com>
+Date: Wed, 28 Feb 2024 18:13:59 +0000
+Subject: [PATCH 01/10] kernel: Introduce enable_and_queue_work() convenience
+ function
+
+The enable_and_queue_work() function is introduced to streamline
+the process of enabling and queuing a work item on a specific
+workqueue. This function combines the functionalities of
+enable_work() and queue_work() in a single call, providing a
+concise and convenient API for enabling and queuing work items.
+
+The function accepts a target workqueue and a work item as parameters.
+It first attempts to enable the work item using enable_work(). If the
+enable operation is successful, the work item is then queued on the
+specified workqueue using queue_work(). The function returns true if
+the work item was successfully enabled and queued, and false otherwise.
+
+This addition aims to enhance code readability and maintainability by
+providing a unified interface for the common use case of enabling and
+queuing work items on a workqueue.
+
+Signed-off-by: Allen Pais <allen.lkml@gmail.com>
+---
+ include/linux/workqueue.h | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/include/linux/workqueue.h b/include/linux/workqueue.h
+index aedfb81f9c49..31bbd38ef8c8 100644
+--- a/include/linux/workqueue.h
++++ b/include/linux/workqueue.h
+@@ -678,6 +678,29 @@ static inline bool schedule_work(struct work_struct *work)
+ 	return queue_work(system_wq, work);
+ }
+ 
++/**
++ * enable_and_queue_work - Enable and queue a work item on a specific workqueue
++ * @wq: The target workqueue
++ * @work: The work item to be enabled and queued
++ *
++ * This function attempts to enable the specified work item using enable_work().
++ * If the enable operation is successful, the work item is then queued on the
++ * provided workqueue using queue_work(). It returns %true if the work item was
++ * successfully enabled and queued, and %false otherwise.
++ *
++ * This function combines the operations of enable_work() and queue_work(),
++ * providing a convenient way to enable and queue a work item in a single call.
++ */
++static inline bool enable_and_queue_work(struct workqueue_struct *wq,
++					 struct work_struct *work)
++{
++	if (enable_work(work)) {
++		queue_work(wq, work);
++		return true;
++	}
++	return false;
++}
++
+ /*
+  * Detect attempt to flush system-wide workqueues at compile time when possible.
+  * Warn attempt to flush system-wide workqueues at runtime.
+-- 
+2.17.1
+
